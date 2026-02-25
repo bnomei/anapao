@@ -1,0 +1,49 @@
+[package]
+name = "anapao"
+version = "0.1.0"
+edition = "2021"
+license-file = "LICENSE"
+rust-version = "1.70"
+description = "Deterministic simulation testing utility for reproducible stochastic workflows"
+readme = "README.md"
+homepage = "https://github.com/bnomei/anapao"
+repository = "https://github.com/bnomei/anapao"
+documentation = "https://docs.rs/anapao"
+keywords = ["testing", "simulation", "deterministic", "stochastic", "monte-carlo"]
+categories = ["development-tools", "development-tools::testing"]
+exclude = [".DS_Store", "specs/**"]
+
+[features]
+default = []
+parallel = ["dep:rayon"]
+analysis-polars = ["dep:polars"]
+assertions-extended = ["dep:approx", "dep:assert-json-diff", "dep:insta", "dep:proptest"]
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0.149", features = ["preserve_order"] }
+thiserror = "2.0.18"
+itoa = "1.0.17"
+ryu = "1.0.22"
+memchr = "2.7.6"
+smallvec = "1.15.1"
+smol_str = "0.3.5"
+rand = "0.10.0"
+rand_chacha = "0.10.0"
+rand_distr = "0.6.0"
+rayon = { version = "1.11.0", optional = true }
+polars = { version = "0.53.0", optional = true, default-features = false, features = ["fmt", "lazy"] }
+approx = { version = "0.5.1", optional = true }
+assert-json-diff = { version = "2.0.2", optional = true }
+insta = { version = "1.43.2", optional = true }
+proptest = { version = "1.9.0", optional = true }
+
+[dev-dependencies]
+rstest = "0.26.1"
+tempfile = "3.23.0"
+criterion = "0.5.1"
+pprof = { version = "0.15.0", features = ["criterion", "flamegraph"] }
+
+[[bench]]
+name = "simulation"
+harness = false

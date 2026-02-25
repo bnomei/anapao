@@ -1,0 +1,4 @@
+interface:
+  display_name: "Anapao Test Authoring"
+  short_description: "Deterministic anapao test workflows"
+  default_prompt: "Add or update an anapao test with deterministic seeds, clear API-surface selection, and parity-safe assertions."

@@ -1,0 +1,187 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "rule_id": "PRB-001",
+      "title": "Pool default amount is zero",
+      "source_section": "Deep dive -> Node semantics -> Pools"
+    },
+    {
+      "rule_id": "PRB-002",
+      "title": "Pool negative start only via state connection",
+      "source_section": "Deep dive -> Node semantics -> Pools"
+    },
+    {
+      "rule_id": "PRB-003",
+      "title": "Pool negative state blocks output",
+      "source_section": "Deep dive -> Node semantics -> Pools"
+    },
+    {
+      "rule_id": "PRB-004",
+      "title": "Pool stores integer values",
+      "source_section": "Deep dive -> Node semantics -> Pools"
+    },
+    {
+      "rule_id": "PRB-005",
+      "title": "Converters and traders require input and output connections",
+      "source_section": "Deep dive -> Node semantics -> Converters and traders"
+    },
+    {
+      "rule_id": "PRB-006",
+      "title": "Gate cannot mix percent and ratio weights",
+      "source_section": "Deep dive -> Node semantics -> Gates"
+    },
+    {
+      "rule_id": "PRB-007",
+      "title": "Trigger gate uses state connections only",
+      "source_section": "Deep dive -> Node semantics -> Trigger gates"
+    },
+    {
+      "rule_id": "PRB-008",
+      "title": "End conditions accept state connections only",
+      "source_section": "Deep dive -> Node semantics -> End conditions"
+    },
+    {
+      "rule_id": "PRB-009",
+      "title": "End conditions are checked every step and stop immediately",
+      "source_section": "Deep dive -> Node semantics -> End conditions"
+    },
+    {
+      "rule_id": "PRB-010",
+      "title": "Resource tokens are positive integers",
+      "source_section": "Deep dive -> Connection semantics -> Resource connections"
+    },
+    {
+      "rule_id": "PRB-011",
+      "title": "State connection default formula is plus one",
+      "source_section": "Deep dive -> Connection semantics -> State connections"
+    },
+    {
+      "rule_id": "PRB-012",
+      "title": "Formula modifiers apply additive signed deltas for next step",
+      "source_section": "Deep dive -> Connection semantics -> Formula modifiers"
+    },
+    {
+      "rule_id": "PRB-013",
+      "title": "Pull/push any vs all semantics",
+      "source_section": "Deep dive -> Trigger and action controls -> Pull/push actions"
+    },
+    {
+      "rule_id": "PRB-014",
+      "title": "Variable names are case-sensitive",
+      "source_section": "Deep dive -> Variables and formula system"
+    },
+    {
+      "rule_id": "PRB-015",
+      "title": "Random interval bounds are inclusive",
+      "source_section": "Deep dive -> Variables and formula system -> Randomness supports"
+    }
+  ],
+  "fixtures": [
+    {
+      "fixture_id": "fx-001-pool-default-zero",
+      "rule_id": "PRB-001",
+      "expected": {
+        "descriptor": "Pool initializes with zero resources when initial amount is omitted."
+      }
+    },
+    {
+      "fixture_id": "fx-002-pool-negative-via-state-only",
+      "rule_id": "PRB-002",
+      "expected": {
+        "descriptor": "Negative Pool state is only legal after a State Connection modifies the value."
+      }
+    },
+    {
+      "fixture_id": "fx-003-pool-negative-blocks-output",
+      "rule_id": "PRB-003",
+      "expected": {
+        "descriptor": "A negative Pool blocks outbound flow and accepts inbound flow until positive."
+      }
+    },
+    {
+      "fixture_id": "fx-004-pool-integer-storage",
+      "rule_id": "PRB-004",
+      "expected": {
+        "descriptor": "Pool storage rejects or normalizes direct fractional values to integer semantics."
+      }
+    },
+    {
+      "fixture_id": "fx-005-converter-input-output-required",
+      "rule_id": "PRB-005",
+      "expected": {
+        "descriptor": "Converter/Trader execution requires at least one input and one output resource edge."
+      }
+    },
+    {
+      "fixture_id": "fx-006-gate-weight-unit-homogeneity",
+      "rule_id": "PRB-006",
+      "expected": {
+        "descriptor": "Sorting Gate validation fails when percentage and ratio weights are mixed."
+      }
+    },
+    {
+      "fixture_id": "fx-007-trigger-gate-state-only",
+      "rule_id": "PRB-007",
+      "expected": {
+        "descriptor": "Trigger Gate definitions with resource inputs are invalid."
+      }
+    },
+    {
+      "fixture_id": "fx-008-end-condition-state-input-only",
+      "rule_id": "PRB-008",
+      "expected": {
+        "descriptor": "End Condition accepts only State Connection inputs."
+      }
+    },
+    {
+      "fixture_id": "fx-009-end-condition-immediate-stop",
+      "rule_id": "PRB-009",
+      "expected": {
+        "descriptor": "Simulation stops in the same step where any End Condition evaluates true."
+      }
+    },
+    {
+      "fixture_id": "fx-010-resource-token-positive-integer",
+      "rule_id": "PRB-010",
+      "expected": {
+        "descriptor": "Resource Connection transfer units are treated as positive integers."
+      }
+    },
+    {
+      "fixture_id": "fx-011-state-connection-default-plus-one",
+      "rule_id": "PRB-011",
+      "expected": {
+        "descriptor": "State Connection formula defaults to +1 when omitted."
+      }
+    },
+    {
+      "fixture_id": "fx-012-formula-modifier-additive-next-step",
+      "rule_id": "PRB-012",
+      "expected": {
+        "descriptor": "Formula Modifier effects are additive and applied to next-step formula value with signed syntax."
+      }
+    },
+    {
+      "fixture_id": "fx-013-pull-push-any-all-behavior",
+      "rule_id": "PRB-013",
+      "expected": {
+        "descriptor": "any modes consume available amounts; all modes require full specified amounts."
+      }
+    },
+    {
+      "fixture_id": "fx-014-variable-case-sensitivity",
+      "rule_id": "PRB-014",
+      "expected": {
+        "descriptor": "Variable references differ by case and must match exact name."
+      }
+    },
+    {
+      "fixture_id": "fx-015-random-interval-inclusive",
+      "rule_id": "PRB-015",
+      "expected": {
+        "descriptor": "Random interval sampling includes both lower and upper bounds."
+      }
+    }
+  ]
+}
