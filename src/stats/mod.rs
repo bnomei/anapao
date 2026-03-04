@@ -5,6 +5,17 @@ use std::collections::BTreeMap;
 use crate::types::{MetricKey, PredictionMetricIndicators};
 
 #[derive(Debug, Clone, PartialEq)]
+/// Streaming moments computed with Welford's online algorithm.
+pub struct StreamingMomentsSummary {
+    pub n: usize,
+    pub mean: f64,
+    pub variance: f64,
+    pub std_dev: f64,
+    pub min: f64,
+    pub max: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 /// Summary statistics computed from a sample vector.
 pub struct StatsSummary {
     pub n: usize,
@@ -19,33 +30,90 @@ pub struct StatsSummary {
     pub p99: f64,
 }
 
-/// Computes descriptive statistics for finite values.
-pub fn summarize(values: &[f64]) -> Option<StatsSummary> {
-    if values.is_empty() || values.iter().any(|value| !value.is_finite()) {
-        return None;
+#[derive(Debug, Clone, Copy)]
+struct WelfordAccumulator {
+    n: usize,
+    mean: f64,
+    m2: f64,
+    min: f64,
+    max: f64,
+}
+
+impl WelfordAccumulator {
+    fn new() -> Self {
+        Self { n: 0, mean: 0.0, m2: 0.0, min: f64::INFINITY, max: f64::NEG_INFINITY }
     }
 
-    let n = values.len();
-    let mean = values.iter().sum::<f64>() / n as f64;
-    let variance = values
-        .iter()
-        .map(|value| {
-            let diff = *value - mean;
-            diff * diff
+    fn push(&mut self, value: f64) -> bool {
+        if !value.is_finite() {
+            return false;
+        }
+
+        if self.n == 0 {
+            self.n = 1;
+            self.mean = value;
+            self.m2 = 0.0;
+            self.min = value;
+            self.max = value;
+            return true;
+        }
+
+        self.n += 1;
+        let n = self.n as f64;
+        let delta = value - self.mean;
+        self.mean += delta / n;
+        let delta2 = value - self.mean;
+        self.m2 += delta * delta2;
+        self.min = self.min.min(value);
+        self.max = self.max.max(value);
+        true
+    }
+
+    fn finalize(self) -> Option<StreamingMomentsSummary> {
+        if self.n == 0 {
+            return None;
+        }
+
+        let variance = self.m2 / self.n as f64;
+        Some(StreamingMomentsSummary {
+            n: self.n,
+            mean: self.mean,
+            variance,
+            std_dev: variance.sqrt(),
+            min: self.min,
+            max: self.max,
         })
-        .sum::<f64>()
-        / n as f64;
+    }
+}
+
+/// Computes streaming moments in one pass without retaining all values.
+pub fn summarize_streaming<I>(values: I) -> Option<StreamingMomentsSummary>
+where
+    I: IntoIterator<Item = f64>,
+{
+    let mut accumulator = WelfordAccumulator::new();
+    for value in values {
+        if !accumulator.push(value) {
+            return None;
+        }
+    }
+    accumulator.finalize()
+}
+
+/// Computes descriptive statistics for finite values.
+pub fn summarize(values: &[f64]) -> Option<StatsSummary> {
+    let summary = summarize_streaming(values.iter().copied())?;
 
     let mut sorted_values = values.to_vec();
     sorted_values.sort_by(f64::total_cmp);
 
     Some(StatsSummary {
-        n,
-        mean,
-        variance,
-        std_dev: variance.sqrt(),
-        min: sorted_values[0],
-        max: sorted_values[n - 1],
+        n: summary.n,
+        mean: summary.mean,
+        variance: summary.variance,
+        std_dev: summary.std_dev,
+        min: summary.min,
+        max: summary.max,
         p50: percentile_sorted(&sorted_values, 50.0)?,
         p90: percentile_sorted(&sorted_values, 90.0)?,
         p95: percentile_sorted(&sorted_values, 95.0)?,
@@ -99,7 +167,7 @@ pub fn summarize_by_metric(
 pub fn mean_confidence_interval_95(values: &[f64]) -> Option<(f64, f64)> {
     const Z_SCORE_95: f64 = 1.959_963_984_540_054;
 
-    let summary = summarize(values)?;
+    let summary = summarize_streaming(values.iter().copied())?;
     if summary.n == 1 {
         return Some((summary.mean, summary.mean));
     }
@@ -179,7 +247,7 @@ mod tests {
 
     use super::{
         mean_confidence_interval_95, percentile_sorted, prediction_indicators,
-        prediction_indicators_by_metric, summarize, summarize_by_metric,
+        prediction_indicators_by_metric, summarize, summarize_by_metric, summarize_streaming,
     };
     use crate::types::MetricKey;
 
@@ -192,6 +260,12 @@ mod tests {
     #[test]
     fn summarize_returns_none_for_empty_input() {
         assert!(summarize(&[]).is_none());
+    }
+
+    #[test]
+    fn summarize_streaming_returns_none_for_empty_or_non_finite_input() {
+        assert!(summarize_streaming(std::iter::empty::<f64>()).is_none());
+        assert!(summarize_streaming([1.0, f64::NAN].into_iter()).is_none());
     }
 
     #[test]
@@ -218,6 +292,69 @@ mod tests {
         assert_close(summary.p90, 9.1);
         assert_close(summary.p95, 9.55);
         assert_close(summary.p99, 9.91);
+    }
+
+    #[test]
+    fn summarize_streaming_matches_legacy_moments_with_deterministic_tolerance() {
+        let values = (0..10_000)
+            .map(|index| {
+                let i = index as f64;
+                (i * 0.37).sin() * 40.0 + (index % 17) as f64 - 8.0
+            })
+            .collect::<Vec<_>>();
+        let streaming = summarize_streaming(values.iter().copied()).expect("streaming summary");
+
+        let mean = values.iter().sum::<f64>() / values.len() as f64;
+        let variance = values
+            .iter()
+            .map(|value| {
+                let diff = *value - mean;
+                diff * diff
+            })
+            .sum::<f64>()
+            / values.len() as f64;
+        let std_dev = variance.sqrt();
+        let min = values.iter().copied().fold(f64::INFINITY, f64::min);
+        let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+
+        assert_eq!(streaming.n, values.len());
+        assert!((streaming.mean - mean).abs() <= 1e-10, "mean drifted");
+        assert!((streaming.variance - variance).abs() <= 1e-10, "variance drifted");
+        assert!((streaming.std_dev - std_dev).abs() <= 1e-10, "std_dev drifted");
+        assert_close(streaming.min, min);
+        assert_close(streaming.max, max);
+    }
+
+    #[test]
+    fn summarize_streaming_accepts_large_iterators_without_collecting() {
+        let n = 50_000_usize;
+        let summary = summarize_streaming((1..=n).map(|value| value as f64))
+            .expect("streaming summary from iterator");
+
+        let n_f64 = n as f64;
+        let expected_mean = (n_f64 + 1.0) / 2.0;
+        let expected_variance = (n_f64 * n_f64 - 1.0) / 12.0;
+
+        assert_eq!(summary.n, n);
+        assert!((summary.mean - expected_mean).abs() <= 1e-9, "mean drifted");
+        assert!((summary.variance - expected_variance).abs() <= 1e-3, "variance drifted");
+        assert!((summary.std_dev - expected_variance.sqrt()).abs() <= 1e-9, "std_dev drifted");
+        assert_close(summary.min, 1.0);
+        assert_close(summary.max, n_f64);
+    }
+
+    #[test]
+    fn summarize_and_streaming_moments_agree() {
+        let values = [3.0, 8.0, 1.0, 4.0, 7.0];
+        let summary = summarize(&values).expect("summary");
+        let streaming = summarize_streaming(values.into_iter()).expect("streaming");
+
+        assert_eq!(summary.n, streaming.n);
+        assert_close(summary.mean, streaming.mean);
+        assert_close(summary.variance, streaming.variance);
+        assert_close(summary.std_dev, streaming.std_dev);
+        assert_close(summary.min, streaming.min);
+        assert_close(summary.max, streaming.max);
     }
 
     #[test]
