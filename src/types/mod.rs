@@ -565,6 +565,65 @@ impl ScenarioSpec {
         }
     }
 
+    /// Builds a minimal source-to-sink scenario with one edge.
+    ///
+    /// The generated ids are stable (`scenario-source-sink`, `source`, `sink`, `edge-source-sink`)
+    /// so callers can customize fields (for example `id`, `end_conditions`) after construction.
+    pub fn source_sink(transfer: TransferSpec) -> Self {
+        let source = NodeId::fixture("source");
+        let sink = NodeId::fixture("sink");
+
+        let mut scenario = Self::new(ScenarioId::fixture("scenario-source-sink"))
+            .with_node(NodeSpec::new(source.clone(), NodeKind::Source).with_initial_value(1.0))
+            .with_node(NodeSpec::new(sink.clone(), NodeKind::Sink))
+            .with_edge(EdgeSpec::new(EdgeId::fixture("edge-source-sink"), source, sink, transfer));
+        scenario.tracked_metrics.insert(MetricKey::fixture("sink"));
+        scenario
+    }
+
+    /// Builds a linear source -> stage* -> sink pipeline with fixed unit transfers.
+    ///
+    /// `node_count` is clamped to at least two nodes (`source` and `sink`).
+    /// Intermediate nodes are named `stage-1`, `stage-2`, ... and use [`NodeKind::Pool`].
+    pub fn linear_pipeline(node_count: usize) -> Self {
+        let node_count = node_count.max(2);
+        let mut scenario = Self::new(ScenarioId::fixture("scenario-linear-pipeline"));
+        let mut node_ids = Vec::with_capacity(node_count);
+
+        for index in 0..node_count {
+            let (id, kind) = match index {
+                0 => ("source".to_string(), NodeKind::Source),
+                last if last == node_count - 1 => ("sink".to_string(), NodeKind::Sink),
+                _ => (format!("stage-{index}"), NodeKind::Pool),
+            };
+
+            let node_id = NodeId::fixture(id);
+            let node = if index == 0 {
+                NodeSpec::new(node_id.clone(), kind).with_initial_value(1.0)
+            } else {
+                NodeSpec::new(node_id.clone(), kind)
+            };
+
+            node_ids.push(node_id);
+            scenario = scenario.with_node(node);
+        }
+
+        for edge_index in 0..(node_ids.len() - 1) {
+            let from = node_ids[edge_index].clone();
+            let to = node_ids[edge_index + 1].clone();
+            let edge = EdgeSpec::new(
+                EdgeId::fixture(format!("edge-{edge_index}")),
+                from,
+                to,
+                TransferSpec::Fixed { amount: 1.0 },
+            );
+            scenario = scenario.with_edge(edge);
+        }
+
+        scenario.tracked_metrics.insert(MetricKey::fixture("sink"));
+        scenario
+    }
+
     /// Inserts or replaces a node by id.
     pub fn with_node(mut self, node: NodeSpec) -> Self {
         self.nodes.insert(node.id.clone(), node);
@@ -1245,6 +1304,7 @@ impl BatchReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Simulator;
 
     #[test]
     fn identifiers_validate_empty_and_control_values() {
@@ -1476,6 +1536,54 @@ mod tests {
 
         let edge_ids: Vec<&str> = scenario.edges.keys().map(EdgeId::as_str).collect();
         assert_eq!(edge_ids, vec!["edge-a", "edge-z"]);
+    }
+
+    #[test]
+    fn scenario_source_sink_constructor_reduces_setup_boilerplate() {
+        let scenario = ScenarioSpec::source_sink(TransferSpec::Fixed { amount: 2.0 });
+        assert_eq!(scenario.id.as_str(), "scenario-source-sink");
+
+        let source = scenario.nodes.get(&NodeId::fixture("source")).expect("source node");
+        assert_eq!(source.kind, NodeKind::Source);
+        assert_eq!(source.initial_value, 1.0);
+
+        let sink = scenario.nodes.get(&NodeId::fixture("sink")).expect("sink node");
+        assert_eq!(sink.kind, NodeKind::Sink);
+
+        let edge = scenario.edges.get(&EdgeId::fixture("edge-source-sink")).expect("edge");
+        assert_eq!(edge.transfer, TransferSpec::Fixed { amount: 2.0 });
+        assert!(scenario.tracked_metrics.contains(&MetricKey::fixture("sink")));
+    }
+
+    #[test]
+    fn scenario_linear_pipeline_constructor_builds_valid_chain() {
+        let scenario = ScenarioSpec::linear_pipeline(4);
+        assert_eq!(scenario.id.as_str(), "scenario-linear-pipeline");
+        assert_eq!(scenario.nodes.len(), 4);
+        assert_eq!(scenario.edges.len(), 3);
+        assert!(scenario.nodes.contains_key(&NodeId::fixture("source")));
+        assert!(scenario.nodes.contains_key(&NodeId::fixture("stage-1")));
+        assert!(scenario.nodes.contains_key(&NodeId::fixture("stage-2")));
+        assert!(scenario.nodes.contains_key(&NodeId::fixture("sink")));
+        assert!(scenario.edges.contains_key(&EdgeId::fixture("edge-0")));
+        assert!(scenario.edges.contains_key(&EdgeId::fixture("edge-1")));
+        assert!(scenario.edges.contains_key(&EdgeId::fixture("edge-2")));
+        assert!(scenario.tracked_metrics.contains(&MetricKey::fixture("sink")));
+    }
+
+    #[test]
+    fn scenario_convenience_constructors_are_compile_and_run_ready() {
+        for scenario in [
+            ScenarioSpec::source_sink(TransferSpec::Fixed { amount: 1.0 }),
+            ScenarioSpec::linear_pipeline(3),
+            ScenarioSpec::linear_pipeline(1),
+        ] {
+            let compiled =
+                Simulator::compile(scenario).expect("constructor scenario should compile");
+            let run = Simulator::run(&compiled, RunConfig::for_seed(42), None)
+                .expect("constructor scenario should run");
+            assert!(run.completed);
+        }
     }
 
     #[test]
