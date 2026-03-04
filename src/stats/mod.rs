@@ -301,15 +301,10 @@ mod tests {
 
     #[test]
     fn summarize_streaming_clamps_negative_rounding_variance() {
-        let summary = super::WelfordAccumulator {
-            n: 4,
-            mean: 1.0,
-            m2: -f64::EPSILON,
-            min: 1.0,
-            max: 1.0,
-        }
-        .finalize()
-        .expect("streaming summary");
+        let summary =
+            super::WelfordAccumulator { n: 4, mean: 1.0, m2: -f64::EPSILON, min: 1.0, max: 1.0 }
+                .finalize()
+                .expect("streaming summary");
 
         assert_close(summary.variance, 0.0);
         assert_close(summary.std_dev, 0.0);
