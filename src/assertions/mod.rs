@@ -856,6 +856,73 @@ mod tests {
     }
 
     #[test]
+    fn batch_probability_band_reports_empty_run_set() {
+        let metric = MetricKey::fixture("pass_rate");
+        let batch_report =
+            BatchReport::new(ScenarioId::fixture("scenario"), 3, ExecutionMode::SingleThread);
+        let expectations = vec![Expectation::ProbabilityBand {
+            metric,
+            min: 0.0,
+            max: 1.0,
+            probability_min: 0.5,
+            probability_max: 1.0,
+        }];
+
+        let report = evaluate_batch_expectations(&batch_report, &expectations).expect("evaluation");
+        assert_eq!(report.passed, 0);
+        assert_eq!(report.failed, 1);
+        assert_eq!(report.results[0].actual, "no runs available");
+    }
+
+    #[test]
+    fn batch_scalar_selectors_cover_step_and_missing_metric_contexts() {
+        let throughput = MetricKey::fixture("throughput");
+        let pass_rate = MetricKey::fixture("pass_rate");
+        let missing = MetricKey::fixture("missing");
+        let batch_report = fixture_batch_report(&throughput, &pass_rate);
+        let expectations = vec![
+            Expectation::Between {
+                metric: throughput.clone(),
+                selector: MetricSelector::Step(1),
+                min: 4.0,
+                max: 6.0,
+            },
+            Expectation::Equals {
+                metric: missing.clone(),
+                selector: MetricSelector::Final,
+                expected: 0.0,
+            },
+            Expectation::Equals {
+                metric: throughput,
+                selector: MetricSelector::Step(99),
+                expected: 0.0,
+            },
+        ];
+
+        let report = evaluate_batch_expectations(&batch_report, &expectations).expect("evaluation");
+        assert_eq!(report.passed, 1);
+        assert_eq!(report.failed, 2);
+
+        let missing_metric = report
+            .results
+            .iter()
+            .find(|result| matches!(&result.expectation, Expectation::Equals { metric, selector: MetricSelector::Final, .. } if metric == &missing))
+            .expect("missing metric result");
+        assert!(missing_metric
+            .actual
+            .contains("missing metric `missing` at `batch.aggregate_series.final`"));
+
+        let missing_step = report
+            .results
+            .iter()
+            .find(|result| matches!(&result.expectation, Expectation::Equals { selector: MetricSelector::Step(step), .. } if *step == 99))
+            .expect("missing step result");
+        assert!(missing_step
+            .actual
+            .contains("missing metric `throughput` at `batch.aggregate_series.step=99`"));
+    }
+
+    #[test]
     fn run_probability_band_reports_missing_and_empty_series() {
         let metric = MetricKey::fixture("missing");
         let expectation = Expectation::ProbabilityBand {

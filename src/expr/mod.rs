@@ -996,4 +996,130 @@ mod tests {
 
         assert_eq!(value, 4.0);
     }
+
+    #[test]
+    fn evaluate_compiled_with_resolver_covers_whitelisted_function_paths() {
+        let runtime = ExprRuntime::new();
+        let compiled = runtime
+            .compile(
+                "log(100) + log(value, base) + ln(exp(1)) + abs(neg) + floor(floor_in) + \
+                 ceil(ceil_in) + round(round_in) + sqrt(sqrt_in) + mod(mod_left, mod_right) + \
+                 min(left, right) + max(left, right) + pow(pow_base, pow_exp) + \
+                 clamp(clamp_value, clamp_min, clamp_max)",
+            )
+            .expect("compile expression");
+
+        let value = runtime
+            .evaluate_compiled_with_resolver(&compiled, |name| match name {
+                "value" => Some(8.0),
+                "base" => Some(2.0),
+                "neg" => Some(-2.0),
+                "floor_in" => Some(2.8),
+                "ceil_in" => Some(2.1),
+                "round_in" => Some(2.6),
+                "sqrt_in" => Some(9.0),
+                "mod_left" => Some(10.0),
+                "mod_right" => Some(3.0),
+                "left" => Some(4.0),
+                "right" => Some(6.0),
+                "pow_base" => Some(2.0),
+                "pow_exp" => Some(3.0),
+                "clamp_value" => Some(7.0),
+                "clamp_min" => Some(0.0),
+                "clamp_max" => Some(5.0),
+                _ => None,
+            })
+            .expect("evaluate with resolver");
+
+        assert!((value - 43.0).abs() < 1e-12, "expected 43.0, got {value}");
+    }
+
+    #[test]
+    fn evaluate_compiled_with_resolver_reports_function_and_lookup_errors() {
+        let runtime = ExprRuntime::new();
+
+        let unknown_fn = runtime.compile("sin(step)").expect("compile expression");
+        let err = runtime
+            .evaluate_compiled_with_resolver(&unknown_fn, |name| (name == "step").then_some(1.0))
+            .expect_err("unknown function should fail");
+        assert!(matches!(err, ExprError::UnknownFunction { name } if name == "sin"));
+
+        let arity = runtime.compile("max(step)").expect("compile expression");
+        let err = runtime
+            .evaluate_compiled_with_resolver(&arity, |name| (name == "step").then_some(1.0))
+            .expect_err("arity mismatch should fail");
+        assert!(matches!(
+            err,
+            ExprError::FunctionArity { name, expected, actual }
+            if name == "max" && expected == "2 arguments" && actual == 1
+        ));
+
+        let unknown_var = runtime.compile("step + missing").expect("compile expression");
+        let err = runtime
+            .evaluate_compiled_with_resolver(&unknown_var, |name| (name == "step").then_some(1.0))
+            .expect_err("unknown variable should fail");
+        assert!(matches!(err, ExprError::UnknownVariable { name } if name == "missing"));
+    }
+
+    #[test]
+    fn evaluate_compiled_with_resolver_reports_division_and_non_finite_errors() {
+        let runtime = ExprRuntime::new();
+
+        let div_zero = runtime.compile("10 / zero").expect("compile expression");
+        let err = runtime
+            .evaluate_compiled_with_resolver(&div_zero, |name| (name == "zero").then_some(0.0))
+            .expect_err("division by zero should fail");
+        assert!(matches!(err, ExprError::DivisionByZero));
+
+        let non_finite = runtime.compile("sqrt(neg)").expect("compile expression");
+        let err = runtime
+            .evaluate_compiled_with_resolver(&non_finite, |name| (name == "neg").then_some(-1.0))
+            .expect_err("non-finite should fail");
+        assert!(matches!(err, ExprError::NonFiniteResult));
+    }
+
+    #[test]
+    fn evaluate_graph_propagates_parse_and_evaluation_failures() {
+        let runtime = ExprRuntime::new();
+        let parse_graph = BTreeMap::from([("a".to_string(), "1 + )".to_string())]);
+        let parse_err = runtime
+            .evaluate_graph(&parse_graph, &BTreeMap::new())
+            .expect_err("invalid expression should fail");
+        assert!(
+            matches!(parse_err, ExprError::UnexpectedToken { token, position } if token == ")" && position == 4)
+        );
+
+        let eval_graph = BTreeMap::from([("a".to_string(), "1 / 0".to_string())]);
+        let eval_err = runtime
+            .evaluate_graph(&eval_graph, &BTreeMap::new())
+            .expect_err("runtime evaluation should fail");
+        assert!(matches!(eval_err, ExprError::DivisionByZero));
+    }
+
+    #[test]
+    fn evaluate_supports_unary_plus_and_minus() {
+        let runtime = ExprRuntime::new();
+        let value = runtime
+            .evaluate("+2 + -(1 + 2)", &BTreeMap::new())
+            .expect("expression should evaluate");
+        assert_eq!(value, -1.0);
+    }
+
+    #[test]
+    fn evaluate_reports_bang_without_equals_token_as_unexpected() {
+        let runtime = ExprRuntime::new();
+        let err = runtime.evaluate("1 + !", &BTreeMap::new()).expect_err("parse must fail");
+        assert!(
+            matches!(err, ExprError::UnexpectedToken { token, position } if token == "!" && position == 4)
+        );
+    }
+
+    #[test]
+    fn evaluate_reports_unknown_character_token() {
+        let runtime = ExprRuntime::new();
+        let err = runtime.evaluate("1 + @", &BTreeMap::new()).expect_err("parse must fail");
+        assert!(
+            matches!(err, ExprError::UnexpectedToken { token, position } if token == "@" && position == 4)
+        );
+    }
 }
