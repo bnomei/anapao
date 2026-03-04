@@ -347,7 +347,7 @@ mod tests {
     fn summarize_and_streaming_moments_agree() {
         let values = [3.0, 8.0, 1.0, 4.0, 7.0];
         let summary = summarize(&values).expect("summary");
-        let streaming = summarize_streaming(values.into_iter()).expect("streaming");
+        let streaming = summarize_streaming(values).expect("streaming");
 
         assert_eq!(summary.n, streaming.n);
         assert_close(summary.mean, streaming.mean);
