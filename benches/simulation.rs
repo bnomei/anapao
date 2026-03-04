@@ -399,7 +399,7 @@ fn benches_simulation_guardrails(c: &mut Criterion) {
     let expanded_compiled_single = Simulator::compile(expanded_semantics_scenario())
         .expect("compile expanded scenario fixture");
     let expanded_run_config =
-        RunConfig { seed: 0xA11C_E55E_D_u64, max_steps: 64, capture: CaptureConfig::default() };
+        RunConfig { seed: 0x000A_11CE_55ED_u64, max_steps: 64, capture: CaptureConfig::default() };
     group.bench_function("single_run_expanded_semantics", move |b| {
         b.iter(|| {
             let report = Simulator::run(

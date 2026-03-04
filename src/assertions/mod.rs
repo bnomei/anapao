@@ -532,6 +532,7 @@ fn evaluate_batch_probability_band(
     AssertionResult { expectation: expectation.clone(), passed, expected, actual, evidence_refs }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn evaluate_probability_band_over_points(
     expectation: &Expectation,
     metric: &MetricKey,
@@ -866,7 +867,7 @@ mod tests {
         };
 
         let missing_report =
-            evaluate_run_expectations(&fixture_run_report(), &[expectation.clone()])
+            evaluate_run_expectations(&fixture_run_report(), std::slice::from_ref(&expectation))
                 .expect("evaluation should complete");
         assert_eq!(missing_report.failed, 1);
         assert_eq!(

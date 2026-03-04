@@ -22,7 +22,7 @@ pub const FIXTURE_RUN_MAX_STEPS: u64 = 10;
 /// Default run count used by deterministic batch fixtures.
 pub const FIXTURE_BATCH_RUNS: u64 = 6;
 /// Default base seed used by deterministic batch fixtures.
-pub const FIXTURE_BATCH_BASE_SEED: u64 = 0xA11C_E55E_D_u64;
+pub const FIXTURE_BATCH_BASE_SEED: u64 = 0x000A_11CE_55ED_u64;
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 /// Root document for parity fixture metadata.

@@ -157,7 +157,7 @@ mod tests {
     #[test]
     fn run_batch_sequential_is_reproducible() {
         let compiled = compiled_fixture();
-        let config = fixture_batch_config(6, 0xA11C_E55E_D_u64, ExecutionMode::SingleThread);
+        let config = fixture_batch_config(6, 0x000A_11CE_55ED_u64, ExecutionMode::SingleThread);
 
         let report_a = run_batch(&compiled, &config).expect("batch run should succeed");
         let report_b = run_batch(&compiled, &config).expect("batch run should succeed");

@@ -187,7 +187,7 @@ mod tests {
 
     #[test]
     fn run_rng_matches_seeded_rng_for_many_run_ids() {
-        let master_seed = 0x0B5E_ED_u64;
+        let master_seed = 0x000B_5EED_u64;
         let mut seen_prefixes = HashSet::with_capacity(2_048);
 
         for run_id in 0_u64..2_048_u64 {

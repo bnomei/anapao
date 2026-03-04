@@ -110,7 +110,7 @@ fn compiled_expanded_semantics() -> CompiledScenario {
 fn perf_determinism_single_replay_expanded_semantics_stress() {
     let compiled = compiled_expanded_semantics();
     let config =
-        RunConfig { seed: 0xA11C_E55E_D_u64, max_steps: 64, capture: CaptureConfig::default() };
+        RunConfig { seed: 0x000A_11CE_55ED_u64, max_steps: 64, capture: CaptureConfig::default() };
     let baseline = run_single(&compiled, &config).expect("run should succeed");
 
     for replay in 0..32 {

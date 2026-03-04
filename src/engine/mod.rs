@@ -707,6 +707,7 @@ struct EdgeTransferPlan {
     transfer: f64,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_edge_transfers(
     compiled: &CompiledScenario,
     state: &mut EngineState,
@@ -830,6 +831,7 @@ fn apply_edge_transfers(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_any_edge_group(
     compiled: &CompiledScenario,
     state: &mut EngineState,
@@ -865,6 +867,7 @@ fn apply_any_edge_group(
     acted
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_all_edge_group(
     compiled: &CompiledScenario,
     state: &mut EngineState,
@@ -960,6 +963,7 @@ fn should_use_gate_routing(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_gate_edge_group(
     compiled: &CompiledScenario,
     state: &mut EngineState,
@@ -1713,6 +1717,7 @@ fn resolve_formula_variable(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn evaluate_state_formula_delta(
     compiled: &CompiledScenario,
     state: &EngineState,

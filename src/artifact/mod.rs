@@ -98,9 +98,9 @@ pub fn write_run_artifacts_with_assertions(
     };
     let ordered_events = ordered_events_storage.as_deref().unwrap_or(events);
 
-    write_events_jsonl(&output_dir.join(EVENTS_FILE), &ordered_events)?;
+    write_events_jsonl(&output_dir.join(EVENTS_FILE), ordered_events)?;
     write_variable_csv(&output_dir.join(VARIABLES_FILE), &run_report.variable_snapshots)?;
-    let history = history_index_report(run_report, &ordered_events);
+    let history = history_index_report(run_report, ordered_events);
     write_history_json(&output_dir.join(HISTORY_FILE), &history)?;
     let replay = replay_index_report(run_report, &history);
     write_replay_json(&output_dir.join(REPLAY_FILE), &replay)?;

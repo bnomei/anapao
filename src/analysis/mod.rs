@@ -49,12 +49,16 @@ pub fn batch_final_metrics_frame(batch_report: &BatchReport) -> PolarsResult<Dat
         }
     }
 
-    DataFrame::new(metrics.len(), vec![
-        Column::new("metric".into(), metrics),
-        Column::new("step".into(), steps),
-        Column::new("value".into(), values),
-        Column::new("run_index".into(), run_indexes),
-    ])
+    let height = metrics.len();
+    DataFrame::new(
+        height,
+        vec![
+            Column::new("metric".into(), metrics),
+            Column::new("step".into(), steps),
+            Column::new("value".into(), values),
+            Column::new("run_index".into(), run_indexes),
+        ],
+    )
 }
 
 fn series_frame(series: &BTreeMap<MetricKey, SeriesTable>) -> PolarsResult<DataFrame> {
@@ -72,11 +76,15 @@ fn series_frame(series: &BTreeMap<MetricKey, SeriesTable>) -> PolarsResult<DataF
         }
     }
 
-    DataFrame::new(metrics.len(), vec![
-        Column::new("metric".into(), metrics),
-        Column::new("step".into(), steps),
-        Column::new("value".into(), values),
-    ])
+    let height = metrics.len();
+    DataFrame::new(
+        height,
+        vec![
+            Column::new("metric".into(), metrics),
+            Column::new("step".into(), steps),
+            Column::new("value".into(), values),
+        ],
+    )
 }
 
 fn sort_points(points: &mut [SeriesPoint]) {
@@ -118,7 +126,7 @@ mod tests {
 
         let frame = run_series_frame(&report).expect("frame");
         assert_eq!(frame.shape(), (4, 3));
-        assert_eq!(column_names(&frame), vec!["metric", "step", "value"]);
+        assert_eq!(frame.get_column_names(), vec!["metric", "step", "value"]);
         assert_eq!(
             frame_rows(&frame, &["metric", "step", "value"]),
             vec![
@@ -144,7 +152,7 @@ mod tests {
 
         let frame = batch_series_frame(&report).expect("frame");
         assert_eq!(frame.shape(), (2, 3));
-        assert_eq!(column_names(&frame), vec!["metric", "step", "value"]);
+        assert_eq!(frame.get_column_names(), vec!["metric", "step", "value"]);
         assert_eq!(
             frame_rows(&frame, &["metric", "step", "value"]),
             vec![
@@ -185,10 +193,7 @@ mod tests {
 
         let frame = batch_final_metrics_frame(&report).expect("frame");
         assert_eq!(frame.shape(), (4, 4));
-        assert_eq!(
-            column_names(&frame),
-            vec!["metric", "step", "value", "run_index"]
-        );
+        assert_eq!(frame.get_column_names(), vec!["metric", "step", "value", "run_index"]);
         assert_eq!(
             frame_rows(&frame, &["metric", "step", "value", "run_index"]),
             vec![
@@ -212,14 +217,6 @@ mod tests {
                     })
                     .collect::<Vec<_>>()
             })
-            .collect::<Vec<_>>()
-    }
-
-    fn column_names(frame: &DataFrame) -> Vec<&str> {
-        frame
-            .get_column_names()
-            .into_iter()
-            .map(|name| name.as_str())
             .collect::<Vec<_>>()
     }
 

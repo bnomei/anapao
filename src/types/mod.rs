@@ -109,7 +109,7 @@ pub enum NodeKind {
     Custom(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 /// Trigger policy for gate-like nodes.
 pub enum TriggerMode {
@@ -118,23 +118,19 @@ pub enum TriggerMode {
     #[serde(alias = "interactive")]
     Interactive,
     #[serde(alias = "automatic")]
+    #[default]
     Automatic,
     #[serde(alias = "enabling")]
     Enabling,
     Custom(String),
 }
 
-impl Default for TriggerMode {
-    fn default() -> Self {
-        Self::Automatic
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 /// Action policy for gate-like nodes.
 pub enum ActionMode {
     #[serde(alias = "push-any")]
+    #[default]
     PushAny,
     #[serde(alias = "push-all")]
     PushAll,
@@ -143,12 +139,6 @@ pub enum ActionMode {
     #[serde(alias = "pull-all")]
     PullAll,
     Custom(String),
-}
-
-impl Default for ActionMode {
-    fn default() -> Self {
-        Self::PushAny
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -310,19 +300,14 @@ pub enum EndConditionSpec {
     All(Vec<EndConditionSpec>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 /// Update schedule for runtime variables.
 pub enum VariableUpdateTiming {
+    #[default]
     EveryStep,
     RunStart,
     Never,
-}
-
-impl Default for VariableUpdateTiming {
-    fn default() -> Self {
-        Self::EveryStep
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -344,18 +329,13 @@ pub struct VariableRuntimeConfig {
     pub sources: BTreeMap<String, VariableSourceSpec>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 /// Connection family for an edge.
 pub enum ConnectionKind {
+    #[default]
     Resource,
     State,
-}
-
-impl Default for ConnectionKind {
-    fn default() -> Self {
-        Self::Resource
-    }
 }
 
 fn default_resource_token_size() -> u64 {
@@ -375,36 +355,26 @@ impl Default for ResourceConnectionConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 /// State-connection semantic role.
 pub enum StateConnectionRole {
     Activator,
     Trigger,
+    #[default]
     Modifier,
     Filter,
 }
 
-impl Default for StateConnectionRole {
-    fn default() -> Self {
-        Self::Modifier
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 /// Target domain for a state-connection formula.
 pub enum StateConnectionTarget {
+    #[default]
     Node,
     ResourceConnection,
     StateConnection,
     Formula,
-}
-
-impl Default for StateConnectionTarget {
-    fn default() -> Self {
-        Self::Node
-    }
 }
 
 fn default_state_connection_formula() -> String {
@@ -438,7 +408,7 @@ impl Default for StateConnectionConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 /// Complete edge-connection configuration.
 pub struct EdgeConnectionConfig {
     #[serde(default, alias = "connection_kind")]
@@ -447,16 +417,6 @@ pub struct EdgeConnectionConfig {
     pub resource: ResourceConnectionConfig,
     #[serde(default)]
     pub state: StateConnectionConfig,
-}
-
-impl Default for EdgeConnectionConfig {
-    fn default() -> Self {
-        Self {
-            kind: ConnectionKind::default(),
-            resource: ResourceConnectionConfig::default(),
-            state: StateConnectionConfig::default(),
-        }
-    }
 }
 
 impl EdgeConnectionConfig {
@@ -624,18 +584,13 @@ impl ScenarioSpec {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 /// Execution strategy for batch runs.
 pub enum ExecutionMode {
+    #[default]
     SingleThread,
     Rayon,
-}
-
-impl Default for ExecutionMode {
-    fn default() -> Self {
-        Self::SingleThread
-    }
 }
 
 /// Capture policy for per-step node and metric snapshots.

@@ -21,6 +21,7 @@ impl Simulator {
     }
 
     /// Execute a single deterministic run and optionally stream synthetic run events to a sink.
+    #[allow(clippy::needless_option_as_deref)]
     pub fn run(
         compiled: &CompiledScenario,
         config: RunConfig,
@@ -41,6 +42,7 @@ impl Simulator {
     }
 
     /// Execute a single deterministic run, evaluate run expectations, and optionally stream run + assertion checkpoint events.
+    #[allow(clippy::needless_option_as_deref)]
     pub fn run_with_assertions(
         compiled: &CompiledScenario,
         config: RunConfig,
