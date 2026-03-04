@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ "${GITHUB_REF_NAME:-}" == v* ]]; then
+if [[ -n "${RELEASE_TAG:-}" ]]; then
+  if [[ "$RELEASE_TAG" == v* ]]; then
+    version="${RELEASE_TAG#v}"
+  else
+    version="$RELEASE_TAG"
+  fi
+elif [[ "${GITHUB_REF_NAME:-}" == v* ]]; then
   version="${GITHUB_REF_NAME#v}"
 else
   version=$(python - <<'PY'

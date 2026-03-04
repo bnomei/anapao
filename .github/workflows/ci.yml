@@ -41,6 +41,13 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Run tests
         run: cargo test --all-targets
-      - name: Run parallel failure-path test
-        if: ${{ hashFiles('tests/failure_path_batch_events.rs') != '' }}
-        run: cargo test --features parallel --test failure_path_batch_events
+
+  test-parallel:
+    name: Test Suite (parallel feature)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run tests (parallel feature)
+        run: cargo test --all-targets --features parallel

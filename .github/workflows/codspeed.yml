@@ -16,10 +16,10 @@ jobs:
     name: Run benchmarks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
 
       - name: Install cargo-codspeed
         run: cargo install cargo-codspeed
@@ -29,12 +29,23 @@ jobs:
       # build and restore it before running.
       - name: Build benchmarks
         run: |
-          mv specs _specs_backup
+          moved_specs=0
+          if [ -d specs ]; then
+            mv specs _specs_backup
+            moved_specs=1
+          fi
+
+          restore_specs() {
+            if [ "$moved_specs" -eq 1 ] && [ -d _specs_backup ]; then
+              mv _specs_backup specs
+            fi
+          }
+          trap restore_specs EXIT
+
           cargo codspeed build -m simulation
-          mv _specs_backup specs
 
       - name: Run benchmarks
-        uses: CodSpeedHQ/action@v4
+        uses: CodSpeedHQ/action@2ac572851726409c88c02a307f1ea2632a9ea59b # v4
         with:
           mode: simulation
           run: cargo codspeed run

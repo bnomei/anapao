@@ -1,3 +1,5 @@
+use std::fs;
+
 use anapao::types::{
     BatchConfig, CaptureConfig, EndConditionSpec, ExecutionMode, MetricKey, RunConfig,
     ScenarioSpec, TransferSpec,
@@ -62,4 +64,23 @@ fn readme_linear_pipeline_convenience_constructor_compiles_and_runs() {
 
     assert!(run.completed);
     assert!(run.final_metrics.contains_key(&MetricKey::fixture("sink")));
+}
+
+#[test]
+fn readme_contains_curated_builder_snippet_signatures() {
+    let path = format!("{}/README.md", env!("CARGO_MANIFEST_DIR"));
+    let readme = fs::read_to_string(&path).expect("read README");
+
+    for needle in [
+        "### Snippet S01 — Build a Minimal Scenario",
+        "let mut scenario = ScenarioSpec::source_sink(TransferSpec::Fixed { amount: 1.0 });",
+        "### Snippet S02 — Compile a Scenario",
+        "assert_eq!(compiled.scenario.id.as_str(), \"scenario-source-sink\");",
+        "### Snippet S03 — Create a Deterministic RunConfig",
+        "let run = RunConfig::for_seed(42).with_max_steps(250).with_capture(CaptureConfig {",
+        "### Snippet S07 — Create BatchConfig",
+        "let mut batch = BatchConfig::for_runs(64)",
+    ] {
+        assert!(readme.contains(needle), "README drift: missing snippet marker `{needle}`");
+    }
 }
