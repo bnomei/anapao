@@ -13,6 +13,8 @@ pub type SimResult<T> = Result<T, SimError>;
 pub enum SetupError {
     #[error("invalid graph reference `{reference}` in graph `{graph}`")]
     InvalidGraphReference { graph: String, reference: String },
+    #[error("cyclic graph `{graph}` with cycle path {cycle_path:?}")]
+    CyclicGraph { graph: String, cycle_path: Vec<String> },
     #[error("invalid parameter `{name}`: {reason}")]
     InvalidParameter { name: String, reason: String },
 }
@@ -136,6 +138,19 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "invalid graph reference `edges.e1.from references missing nodes.missing; hint: choose one of the available node IDs: [source, sink]` in graph `scenario[s].nodes`"
+        );
+    }
+
+    #[test]
+    fn setup_error_cyclic_graph_display_text() {
+        let err = SetupError::CyclicGraph {
+            graph: "resource-graph".to_string(),
+            cycle_path: vec!["a".to_string(), "b".to_string(), "a".to_string()],
+        };
+
+        assert_eq!(
+            err.to_string(),
+            "cyclic graph `resource-graph` with cycle path [\"a\", \"b\", \"a\"]"
         );
     }
 
