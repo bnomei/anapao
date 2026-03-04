@@ -156,6 +156,13 @@ enum BinaryOp {
     Sub,
     Mul,
     Div,
+    Mod,
+    Greater,
+    GreaterEqual,
+    Less,
+    LessEqual,
+    Equal,
+    NotEqual,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -166,6 +173,13 @@ enum Token {
     Minus,
     Star,
     Slash,
+    Percent,
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
+    EqualEqual,
+    BangEqual,
     LParen,
     RParen,
     Comma,
@@ -181,6 +195,13 @@ impl Token {
             Token::Minus => "-".to_string(),
             Token::Star => "*".to_string(),
             Token::Slash => "/".to_string(),
+            Token::Percent => "%".to_string(),
+            Token::Less => "<".to_string(),
+            Token::LessEqual => "<=".to_string(),
+            Token::Greater => ">".to_string(),
+            Token::GreaterEqual => ">=".to_string(),
+            Token::EqualEqual => "==".to_string(),
+            Token::BangEqual => "!=".to_string(),
             Token::LParen => "(".to_string(),
             Token::RParen => ")".to_string(),
             Token::Comma => ",".to_string(),
@@ -223,6 +244,46 @@ impl<'a> Lexer<'a> {
             b'/' => {
                 self.pos += 1;
                 Token::Slash
+            }
+            b'%' => {
+                self.pos += 1;
+                Token::Percent
+            }
+            b'<' => {
+                self.pos += 1;
+                if matches!(self.bytes.get(self.pos), Some(b'=')) {
+                    self.pos += 1;
+                    Token::LessEqual
+                } else {
+                    Token::Less
+                }
+            }
+            b'>' => {
+                self.pos += 1;
+                if matches!(self.bytes.get(self.pos), Some(b'=')) {
+                    self.pos += 1;
+                    Token::GreaterEqual
+                } else {
+                    Token::Greater
+                }
+            }
+            b'=' => {
+                self.pos += 1;
+                if matches!(self.bytes.get(self.pos), Some(b'=')) {
+                    self.pos += 1;
+                    Token::EqualEqual
+                } else {
+                    return Err(ExprError::UnexpectedToken { token: "=".to_string(), position });
+                }
+            }
+            b'!' => {
+                self.pos += 1;
+                if matches!(self.bytes.get(self.pos), Some(b'=')) {
+                    self.pos += 1;
+                    Token::BangEqual
+                } else {
+                    return Err(ExprError::UnexpectedToken { token: "!".to_string(), position });
+                }
             }
             b'(' => {
                 self.pos += 1;
@@ -329,6 +390,29 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_expression(&mut self) -> Result<Expr, ExprError> {
+        self.parse_comparison()
+    }
+
+    fn parse_comparison(&mut self) -> Result<Expr, ExprError> {
+        let mut left = self.parse_additive()?;
+        loop {
+            let op = match self.current.0 {
+                Token::Greater => BinaryOp::Greater,
+                Token::GreaterEqual => BinaryOp::GreaterEqual,
+                Token::Less => BinaryOp::Less,
+                Token::LessEqual => BinaryOp::LessEqual,
+                Token::EqualEqual => BinaryOp::Equal,
+                Token::BangEqual => BinaryOp::NotEqual,
+                _ => break,
+            };
+            self.bump()?;
+            let right = self.parse_additive()?;
+            left = Expr::Binary { op, left: Box::new(left), right: Box::new(right) };
+        }
+        Ok(left)
+    }
+
+    fn parse_additive(&mut self) -> Result<Expr, ExprError> {
         let mut left = self.parse_term()?;
         loop {
             let op = match self.current.0 {
@@ -349,6 +433,7 @@ impl<'a> Parser<'a> {
             let op = match self.current.0 {
                 Token::Star => BinaryOp::Mul,
                 Token::Slash => BinaryOp::Div,
+                Token::Percent => BinaryOp::Mod,
                 _ => break,
             };
             self.bump()?;
@@ -455,6 +540,18 @@ fn eval_node(expr: &Expr, variables: &BTreeMap<String, f64>) -> Result<f64, Expr
                     }
                     lhs / rhs
                 }
+                BinaryOp::Mod => {
+                    if rhs == 0.0 {
+                        return Err(ExprError::DivisionByZero);
+                    }
+                    lhs % rhs
+                }
+                BinaryOp::Greater => bool_to_f64(lhs > rhs),
+                BinaryOp::GreaterEqual => bool_to_f64(lhs >= rhs),
+                BinaryOp::Less => bool_to_f64(lhs < rhs),
+                BinaryOp::LessEqual => bool_to_f64(lhs <= rhs),
+                BinaryOp::Equal => bool_to_f64(lhs == rhs),
+                BinaryOp::NotEqual => bool_to_f64(lhs != rhs),
             }
         }
         Expr::Call { name, args } => eval_call(name, args, variables)?,
@@ -496,6 +593,18 @@ where
                     }
                     lhs / rhs
                 }
+                BinaryOp::Mod => {
+                    if rhs == 0.0 {
+                        return Err(ExprError::DivisionByZero);
+                    }
+                    lhs % rhs
+                }
+                BinaryOp::Greater => bool_to_f64(lhs > rhs),
+                BinaryOp::GreaterEqual => bool_to_f64(lhs >= rhs),
+                BinaryOp::Less => bool_to_f64(lhs < rhs),
+                BinaryOp::LessEqual => bool_to_f64(lhs <= rhs),
+                BinaryOp::Equal => bool_to_f64(lhs == rhs),
+                BinaryOp::NotEqual => bool_to_f64(lhs != rhs),
             }
         }
         Expr::Call { name, args } => eval_call_with_resolver(name, args, resolve)?,
@@ -517,11 +626,15 @@ fn eval_call(
         args.iter().map(|arg| eval_node(arg, variables)).collect::<Result<Vec<_>, _>>()?;
 
     match name {
+        "log" => log_fn(&evaluated),
+        "ln" => unary("ln", &evaluated, f64::ln),
+        "exp" => unary("exp", &evaluated, f64::exp),
         "abs" => unary("abs", &evaluated, f64::abs),
         "floor" => unary("floor", &evaluated, f64::floor),
         "ceil" => unary("ceil", &evaluated, f64::ceil),
         "round" => unary("round", &evaluated, f64::round),
         "sqrt" => unary("sqrt", &evaluated, f64::sqrt),
+        "mod" => modulo("mod", &evaluated),
         "min" => binary("min", &evaluated, f64::min),
         "max" => binary("max", &evaluated, f64::max),
         "pow" => binary("pow", &evaluated, f64::powf),
@@ -540,11 +653,15 @@ where
         .collect::<Result<Vec<_>, _>>()?;
 
     match name {
+        "log" => log_fn(&evaluated),
+        "ln" => unary("ln", &evaluated, f64::ln),
+        "exp" => unary("exp", &evaluated, f64::exp),
         "abs" => unary("abs", &evaluated, f64::abs),
         "floor" => unary("floor", &evaluated, f64::floor),
         "ceil" => unary("ceil", &evaluated, f64::ceil),
         "round" => unary("round", &evaluated, f64::round),
         "sqrt" => unary("sqrt", &evaluated, f64::sqrt),
+        "mod" => modulo("mod", &evaluated),
         "min" => binary("min", &evaluated, f64::min),
         "max" => binary("max", &evaluated, f64::max),
         "pow" => binary("pow", &evaluated, f64::powf),
@@ -586,6 +703,40 @@ fn ternary(name: &str, args: &[f64], f: fn(f64, f64, f64) -> f64) -> Result<f64,
     Ok(f(args[0], args[1], args[2]))
 }
 
+fn log_fn(args: &[f64]) -> Result<f64, ExprError> {
+    match args {
+        [value] => Ok(value.log10()),
+        [value, base] => Ok(value.log(*base)),
+        _ => Err(ExprError::FunctionArity {
+            name: "log".to_string(),
+            expected: "1 or 2 arguments",
+            actual: args.len(),
+        }),
+    }
+}
+
+fn modulo(name: &str, args: &[f64]) -> Result<f64, ExprError> {
+    if args.len() != 2 {
+        return Err(ExprError::FunctionArity {
+            name: name.to_string(),
+            expected: "2 arguments",
+            actual: args.len(),
+        });
+    }
+    if args[1] == 0.0 {
+        return Err(ExprError::DivisionByZero);
+    }
+    Ok(args[0] % args[1])
+}
+
+fn bool_to_f64(value: bool) -> f64 {
+    if value {
+        1.0
+    } else {
+        0.0
+    }
+}
+
 fn collect_variable_refs(expr: &Expr, out: &mut BTreeSet<String>) {
     match expr {
         Expr::Number(_) => {}
@@ -623,6 +774,40 @@ mod tests {
             .expect("expression should evaluate");
 
         assert_eq!(value, 4.0 + 8.0 + 2.0 + 0.0);
+    }
+
+    #[test]
+    fn evaluate_supports_extended_math_functions_deterministically() {
+        let runtime = ExprRuntime::new();
+        let value = runtime
+            .evaluate(
+                "log(100) + log(8, 2) + ln(exp(1)) + exp(0) + mod(10, 3) + (10 % 4)",
+                &BTreeMap::new(),
+            )
+            .expect("expression should evaluate");
+
+        assert!((value - 10.0).abs() < 1e-12, "expected 10.0, got {value}");
+    }
+
+    #[test]
+    fn evaluate_supports_comparison_operators_with_numeric_boolean_results() {
+        let runtime = ExprRuntime::new();
+
+        assert_eq!(runtime.evaluate("3 > 2", &BTreeMap::new()).expect("comparison"), 1.0);
+        assert_eq!(runtime.evaluate("3 >= 3", &BTreeMap::new()).expect("comparison"), 1.0);
+        assert_eq!(runtime.evaluate("2 < 1", &BTreeMap::new()).expect("comparison"), 0.0);
+        assert_eq!(runtime.evaluate("2 <= 1", &BTreeMap::new()).expect("comparison"), 0.0);
+        assert_eq!(runtime.evaluate("2 == 2", &BTreeMap::new()).expect("comparison"), 1.0);
+        assert_eq!(runtime.evaluate("2 != 2", &BTreeMap::new()).expect("comparison"), 0.0);
+    }
+
+    #[test]
+    fn evaluate_comparison_has_lower_precedence_than_arithmetic() {
+        let runtime = ExprRuntime::new();
+        let value = runtime
+            .evaluate("1 + 2 > 2 * 1", &BTreeMap::new())
+            .expect("expression should evaluate");
+        assert_eq!(value, 1.0);
     }
 
     #[test]
@@ -669,9 +854,28 @@ mod tests {
     }
 
     #[test]
+    fn evaluate_reports_single_equals_token_as_unexpected() {
+        let runtime = ExprRuntime::new();
+        let err = runtime.evaluate("1 = 1", &BTreeMap::new()).expect_err("parse must fail");
+        assert!(
+            matches!(err, ExprError::UnexpectedToken { token, position } if token == "=" && position == 2)
+        );
+    }
+
+    #[test]
     fn evaluate_reports_division_by_zero() {
         let runtime = ExprRuntime::new();
         let err = runtime.evaluate("10 / (3 - 3)", &BTreeMap::new()).expect_err("must reject /0");
+        assert!(matches!(err, ExprError::DivisionByZero));
+    }
+
+    #[test]
+    fn evaluate_reports_modulo_by_zero() {
+        let runtime = ExprRuntime::new();
+        let err = runtime.evaluate("10 % 0", &BTreeMap::new()).expect_err("must reject %0");
+        assert!(matches!(err, ExprError::DivisionByZero));
+
+        let err = runtime.evaluate("mod(10, 0)", &BTreeMap::new()).expect_err("must reject mod/0");
         assert!(matches!(err, ExprError::DivisionByZero));
     }
 
@@ -690,6 +894,17 @@ mod tests {
             err,
             ExprError::FunctionArity { name, expected, actual }
             if name == "max" && expected == "2 arguments" && actual == 1
+        ));
+    }
+
+    #[test]
+    fn evaluate_reports_new_function_arity_mismatch() {
+        let runtime = ExprRuntime::new();
+        let err = runtime.evaluate("mod(1)", &BTreeMap::new()).expect_err("arity must fail");
+        assert!(matches!(
+            err,
+            ExprError::FunctionArity { name, expected, actual }
+            if name == "mod" && expected == "2 arguments" && actual == 1
         ));
     }
 

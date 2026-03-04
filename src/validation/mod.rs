@@ -23,13 +23,21 @@ pub fn compile_scenario(spec: &ScenarioSpec) -> Result<CompiledScenario, SetupEr
         if !spec.nodes.contains_key(&edge.from) {
             return Err(SetupError::InvalidGraphReference {
                 graph: format!("scenario[{}].nodes", spec.id),
-                reference: format!("edges.{edge_id}.from references missing nodes.{}", edge.from),
+                reference: with_available_ids_hint(
+                    format!("edges.{edge_id}.from references missing nodes.{}", edge.from),
+                    "node IDs",
+                    available_node_ids(spec),
+                ),
             });
         }
         if !spec.nodes.contains_key(&edge.to) {
             return Err(SetupError::InvalidGraphReference {
                 graph: format!("scenario[{}].nodes", spec.id),
-                reference: format!("edges.{edge_id}.to references missing nodes.{}", edge.to),
+                reference: with_available_ids_hint(
+                    format!("edges.{edge_id}.to references missing nodes.{}", edge.to),
+                    "node IDs",
+                    available_node_ids(spec),
+                ),
             });
         }
     }
@@ -41,6 +49,7 @@ pub fn compile_scenario(spec: &ScenarioSpec) -> Result<CompiledScenario, SetupEr
     }
     validate_transfer_metric_references(spec)?;
     validate_tracked_metric_references(spec)?;
+    validate_resource_connection_cycles(spec)?;
     validate_connection_invariants(spec)?;
     validate_node_invariants(spec)?;
 
@@ -164,7 +173,11 @@ fn validate_end_condition_references(
             if !spec.nodes.contains_key(node_id) {
                 return Err(SetupError::InvalidGraphReference {
                     graph: format!("scenario[{}].nodes", spec.id),
-                    reference: format!("{path}.node_id references missing nodes.{node_id}"),
+                    reference: with_available_ids_hint(
+                        format!("{path}.node_id references missing nodes.{node_id}"),
+                        "node IDs",
+                        available_node_ids(spec),
+                    ),
                 });
             }
         }
@@ -173,7 +186,11 @@ fn validate_end_condition_references(
             if !metric_resolves_to_node(spec, metric) {
                 return Err(SetupError::InvalidGraphReference {
                     graph: format!("scenario[{}].metrics", spec.id),
-                    reference: format!("{path}.metric references unresolved metric `{metric}`"),
+                    reference: with_available_ids_hint(
+                        format!("{path}.metric references unresolved metric `{metric}`"),
+                        "metric keys",
+                        available_metric_keys(spec),
+                    ),
                 });
             }
         }
@@ -189,8 +206,12 @@ fn validate_transfer_metric_references(spec: &ScenarioSpec) -> Result<(), SetupE
             if !metric_resolves_to_node(spec, metric) {
                 return Err(SetupError::InvalidGraphReference {
                     graph: format!("scenario[{}].metrics", spec.id),
-                    reference: format!(
-                        "edges.{edge_id}.transfer.metric references unresolved metric `{metric}`"
+                    reference: with_available_ids_hint(
+                        format!(
+                            "edges.{edge_id}.transfer.metric references unresolved metric `{metric}`"
+                        ),
+                        "metric keys",
+                        available_metric_keys(spec),
                     ),
                 });
             }
@@ -205,8 +226,10 @@ fn validate_tracked_metric_references(spec: &ScenarioSpec) -> Result<(), SetupEr
         if !metric_resolves_to_node(spec, metric) {
             return Err(SetupError::InvalidGraphReference {
                 graph: format!("scenario[{}].metrics", spec.id),
-                reference: format!(
-                    "tracked_metrics[{metric}] references unresolved metric `{metric}`"
+                reference: with_available_ids_hint(
+                    format!("tracked_metrics[{metric}] references unresolved metric `{metric}`"),
+                    "metric keys",
+                    available_metric_keys(spec),
                 ),
             });
         }
@@ -217,6 +240,106 @@ fn validate_tracked_metric_references(spec: &ScenarioSpec) -> Result<(), SetupEr
 
 fn metric_resolves_to_node(spec: &ScenarioSpec, metric: &MetricKey) -> bool {
     spec.nodes.keys().any(|node_id| node_id.as_str() == metric.as_str())
+}
+
+fn available_node_ids(spec: &ScenarioSpec) -> Vec<String> {
+    spec.nodes.keys().map(ToString::to_string).collect::<Vec<_>>()
+}
+
+fn available_edge_ids(spec: &ScenarioSpec) -> Vec<String> {
+    spec.edges.keys().map(ToString::to_string).collect::<Vec<_>>()
+}
+
+fn available_metric_keys(spec: &ScenarioSpec) -> Vec<String> {
+    spec.nodes.keys().map(ToString::to_string).collect::<Vec<_>>()
+}
+
+fn with_available_ids_hint(reference: String, label: &str, available_ids: Vec<String>) -> String {
+    let available =
+        if available_ids.is_empty() { "<none>".to_string() } else { available_ids.join(", ") };
+    format!("{reference}; hint: choose one of the available {label}: [{available}]")
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VisitState {
+    Visiting,
+    Visited,
+}
+
+fn validate_resource_connection_cycles(spec: &ScenarioSpec) -> Result<(), SetupError> {
+    let mut adjacency: BTreeMap<NodeId, Vec<NodeId>> = BTreeMap::new();
+    for edge in spec.edges.values() {
+        if matches!(edge.connection.kind, ConnectionKind::Resource) {
+            adjacency.entry(edge.from.clone()).or_default().push(edge.to.clone());
+        }
+    }
+
+    for targets in adjacency.values_mut() {
+        targets.sort();
+        targets.dedup();
+    }
+
+    let mut visit_state: BTreeMap<NodeId, VisitState> = BTreeMap::new();
+    let mut active_path: Vec<NodeId> = Vec::new();
+
+    for node_id in spec.nodes.keys() {
+        if visit_state.contains_key(node_id) {
+            continue;
+        }
+
+        if let Some(cycle_path) =
+            detect_cycle_from(node_id, &adjacency, &mut visit_state, &mut active_path)
+        {
+            return Err(SetupError::CyclicGraph {
+                graph: format!("scenario[{}].resource_connections", spec.id),
+                cycle_path,
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn detect_cycle_from(
+    node_id: &NodeId,
+    adjacency: &BTreeMap<NodeId, Vec<NodeId>>,
+    visit_state: &mut BTreeMap<NodeId, VisitState>,
+    active_path: &mut Vec<NodeId>,
+) -> Option<Vec<String>> {
+    visit_state.insert(node_id.clone(), VisitState::Visiting);
+    active_path.push(node_id.clone());
+
+    if let Some(targets) = adjacency.get(node_id) {
+        for target in targets {
+            match visit_state.get(target).copied() {
+                Some(VisitState::Visited) => {}
+                Some(VisitState::Visiting) => {
+                    if let Some(start) =
+                        active_path.iter().position(|path_node| path_node == target)
+                    {
+                        let mut cycle_path = active_path[start..]
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>();
+                        cycle_path.push(target.to_string());
+                        return Some(cycle_path);
+                    }
+                    return Some(vec![target.to_string(), target.to_string()]);
+                }
+                None => {
+                    if let Some(cycle_path) =
+                        detect_cycle_from(target, adjacency, visit_state, active_path)
+                    {
+                        return Some(cycle_path);
+                    }
+                }
+            }
+        }
+    }
+
+    active_path.pop();
+    visit_state.insert(node_id.clone(), VisitState::Visited);
+    None
 }
 
 fn validate_connection_invariants(spec: &ScenarioSpec) -> Result<(), SetupError> {
@@ -375,8 +498,12 @@ fn required_target_edge<'a>(
 ) -> Result<&'a EdgeSpec, SetupError> {
     spec.edges.get(target_edge_id).ok_or_else(|| SetupError::InvalidGraphReference {
         graph: format!("scenario[{}].edges", spec.id),
-        reference: format!(
-            "edges.{edge_id}.connection.state.target_connection references missing edges.{target_edge_id}"
+        reference: with_available_ids_hint(
+            format!(
+                "edges.{edge_id}.connection.state.target_connection references missing edges.{target_edge_id}"
+            ),
+            "edge IDs",
+            available_edge_ids(spec),
         ),
     })
 }
@@ -571,8 +698,8 @@ mod tests {
             .with_node(NodeSpec::new(node_m_id.clone(), NodeKind::Process))
             .with_edge(EdgeSpec::new(
                 edge_z_id.clone(),
-                node_z_id.clone(),
                 node_a_id.clone(),
+                node_z_id.clone(),
                 TransferSpec::Remaining,
             ))
             .with_edge(EdgeSpec::new(
@@ -618,7 +745,10 @@ mod tests {
         match error {
             SetupError::InvalidGraphReference { graph, reference } => {
                 assert_eq!(graph, "scenario[scenario].nodes");
-                assert_eq!(reference, "edges.edge-1.from references missing nodes.node-missing");
+                assert_eq!(
+                    reference,
+                    "edges.edge-1.from references missing nodes.node-missing; hint: choose one of the available node IDs: [node-existing]"
+                );
             }
             other => panic!("expected InvalidGraphReference, got {other:?}"),
         }
@@ -643,7 +773,118 @@ mod tests {
         match error {
             SetupError::InvalidGraphReference { graph, reference } => {
                 assert_eq!(graph, "scenario[scenario].nodes");
-                assert_eq!(reference, "edges.edge-1.to references missing nodes.node-missing");
+                assert_eq!(
+                    reference,
+                    "edges.edge-1.to references missing nodes.node-missing; hint: choose one of the available node IDs: [node-existing]"
+                );
+            }
+            other => panic!("expected InvalidGraphReference, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compile_scenario_rejects_resource_connection_cycles() {
+        let node_a = crate::types::NodeId::fixture("node-a");
+        let node_b = crate::types::NodeId::fixture("node-b");
+        let node_c = crate::types::NodeId::fixture("node-c");
+
+        let spec = ScenarioSpec::new(ScenarioId::fixture("scenario"))
+            .with_node(NodeSpec::new(node_a.clone(), NodeKind::Source))
+            .with_node(NodeSpec::new(node_b.clone(), NodeKind::Process))
+            .with_node(NodeSpec::new(node_c.clone(), NodeKind::Sink))
+            .with_edge(EdgeSpec::new(
+                crate::types::EdgeId::fixture("edge-ab"),
+                node_a.clone(),
+                node_b.clone(),
+                TransferSpec::Fixed { amount: 1.0 },
+            ))
+            .with_edge(EdgeSpec::new(
+                crate::types::EdgeId::fixture("edge-bc"),
+                node_b.clone(),
+                node_c.clone(),
+                TransferSpec::Fixed { amount: 1.0 },
+            ))
+            .with_edge(EdgeSpec::new(
+                crate::types::EdgeId::fixture("edge-ca"),
+                node_c,
+                node_a,
+                TransferSpec::Fixed { amount: 1.0 },
+            ));
+
+        let error = compile_scenario(&spec).expect_err("resource cycle must fail");
+        match error {
+            SetupError::CyclicGraph { graph, cycle_path } => {
+                assert_eq!(graph, "scenario[scenario].resource_connections");
+                assert_eq!(
+                    cycle_path,
+                    vec![
+                        "node-a".to_string(),
+                        "node-b".to_string(),
+                        "node-c".to_string(),
+                        "node-a".to_string()
+                    ]
+                );
+            }
+            other => panic!("expected CyclicGraph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compile_scenario_accepts_acyclic_resource_connections() {
+        let node_a = crate::types::NodeId::fixture("node-a");
+        let node_b = crate::types::NodeId::fixture("node-b");
+        let node_c = crate::types::NodeId::fixture("node-c");
+
+        let spec = ScenarioSpec::new(ScenarioId::fixture("scenario"))
+            .with_node(NodeSpec::new(node_a.clone(), NodeKind::Source))
+            .with_node(NodeSpec::new(node_b.clone(), NodeKind::Process))
+            .with_node(NodeSpec::new(node_c.clone(), NodeKind::Sink))
+            .with_edge(EdgeSpec::new(
+                crate::types::EdgeId::fixture("edge-ab"),
+                node_a,
+                node_b.clone(),
+                TransferSpec::Fixed { amount: 1.0 },
+            ))
+            .with_edge(EdgeSpec::new(
+                crate::types::EdgeId::fixture("edge-bc"),
+                node_b,
+                node_c,
+                TransferSpec::Fixed { amount: 1.0 },
+            ));
+
+        compile_scenario(&spec).expect("acyclic resource graph should compile");
+    }
+
+    #[test]
+    fn compile_scenario_checks_references_before_cycle_detection() {
+        let node_a = crate::types::NodeId::fixture("node-a");
+        let node_b = crate::types::NodeId::fixture("node-b");
+
+        let mut spec = ScenarioSpec::new(ScenarioId::fixture("scenario"))
+            .with_node(NodeSpec::new(node_a.clone(), NodeKind::Source))
+            .with_node(NodeSpec::new(node_b.clone(), NodeKind::Sink))
+            .with_edge(EdgeSpec::new(
+                crate::types::EdgeId::fixture("edge-ab"),
+                node_a.clone(),
+                node_b.clone(),
+                TransferSpec::Fixed { amount: 1.0 },
+            ))
+            .with_edge(EdgeSpec::new(
+                crate::types::EdgeId::fixture("edge-ba"),
+                node_b,
+                node_a,
+                TransferSpec::Fixed { amount: 1.0 },
+            ));
+        spec.tracked_metrics.insert(MetricKey::fixture("missing-metric"));
+
+        let error = compile_scenario(&spec).expect_err("reference validation should run first");
+        match error {
+            SetupError::InvalidGraphReference { graph, reference } => {
+                assert_eq!(graph, "scenario[scenario].metrics");
+                assert_eq!(
+                    reference,
+                    "tracked_metrics[missing-metric] references unresolved metric `missing-metric`; hint: choose one of the available metric keys: [node-a, node-b]"
+                );
             }
             other => panic!("expected InvalidGraphReference, got {other:?}"),
         }
@@ -705,7 +946,7 @@ mod tests {
                 assert_eq!(graph, "scenario[scenario].nodes");
                 assert_eq!(
                     reference,
-                    "end_conditions[0].all[0].node_id references missing nodes.missing-node"
+                    "end_conditions[0].all[0].node_id references missing nodes.missing-node; hint: choose one of the available node IDs: [sink, source]"
                 );
             }
             other => panic!("expected InvalidGraphReference, got {other:?}"),
@@ -738,7 +979,7 @@ mod tests {
                 assert_eq!(graph, "scenario[scenario].metrics");
                 assert_eq!(
                     reference,
-                    "end_conditions[0].metric references unresolved metric `missing-metric`"
+                    "end_conditions[0].metric references unresolved metric `missing-metric`; hint: choose one of the available metric keys: [sink, source]"
                 );
             }
             other => panic!("expected InvalidGraphReference, got {other:?}"),
@@ -769,7 +1010,7 @@ mod tests {
                 assert_eq!(graph, "scenario[scenario].metrics");
                 assert_eq!(
                     reference,
-                    "edges.edge-1.transfer.metric references unresolved metric `missing-metric`"
+                    "edges.edge-1.transfer.metric references unresolved metric `missing-metric`; hint: choose one of the available metric keys: [sink, source]"
                 );
             }
             other => panic!("expected InvalidGraphReference, got {other:?}"),
@@ -799,7 +1040,7 @@ mod tests {
                 assert_eq!(graph, "scenario[scenario].metrics");
                 assert_eq!(
                     reference,
-                    "tracked_metrics[missing-metric] references unresolved metric `missing-metric`"
+                    "tracked_metrics[missing-metric] references unresolved metric `missing-metric`; hint: choose one of the available metric keys: [sink, source]"
                 );
             }
             other => panic!("expected InvalidGraphReference, got {other:?}"),
@@ -1286,6 +1527,45 @@ mod tests {
             SetupError::InvalidParameter { name, .. }
                 if name == "edges.state-edge.connection.state.target_connection"
         ));
+
+        let missing_edge_target_spec = ScenarioSpec::new(ScenarioId::fixture("scenario"))
+            .with_node(NodeSpec::new(source.clone(), NodeKind::Source))
+            .with_node(NodeSpec::new(sink.clone(), NodeKind::Sink))
+            .with_edge(EdgeSpec::new(
+                resource_edge_id.clone(),
+                source.clone(),
+                sink.clone(),
+                TransferSpec::Fixed { amount: 1.0 },
+            ))
+            .with_edge(
+                EdgeSpec::new(
+                    crate::types::EdgeId::fixture("state-edge"),
+                    source.clone(),
+                    sink.clone(),
+                    TransferSpec::Remaining,
+                )
+                .with_connection(EdgeConnectionConfig {
+                    kind: ConnectionKind::State,
+                    resource: Default::default(),
+                    state: StateConnectionConfig {
+                        target: StateConnectionTarget::ResourceConnection,
+                        target_connection: Some(crate::types::EdgeId::fixture("missing-edge")),
+                        ..Default::default()
+                    },
+                }),
+            );
+        let missing_edge_target_error =
+            compile_scenario(&missing_edge_target_spec).expect_err("missing target edge must fail");
+        match missing_edge_target_error {
+            SetupError::InvalidGraphReference { graph, reference } => {
+                assert_eq!(graph, "scenario[scenario].edges");
+                assert_eq!(
+                    reference,
+                    "edges.state-edge.connection.state.target_connection references missing edges.missing-edge; hint: choose one of the available edge IDs: [resource-edge, state-edge]"
+                );
+            }
+            other => panic!("expected InvalidGraphReference, got {other:?}"),
+        }
 
         let mismatched_target_spec = ScenarioSpec::new(ScenarioId::fixture("scenario"))
             .with_node(NodeSpec::new(source.clone(), NodeKind::Source))

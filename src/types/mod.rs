@@ -565,6 +565,65 @@ impl ScenarioSpec {
         }
     }
 
+    /// Builds a minimal source-to-sink scenario with one edge.
+    ///
+    /// The generated ids are stable (`scenario-source-sink`, `source`, `sink`, `edge-source-sink`)
+    /// so callers can customize fields (for example `id`, `end_conditions`) after construction.
+    pub fn source_sink(transfer: TransferSpec) -> Self {
+        let source = NodeId::fixture("source");
+        let sink = NodeId::fixture("sink");
+
+        let mut scenario = Self::new(ScenarioId::fixture("scenario-source-sink"))
+            .with_node(NodeSpec::new(source.clone(), NodeKind::Source).with_initial_value(1.0))
+            .with_node(NodeSpec::new(sink.clone(), NodeKind::Sink))
+            .with_edge(EdgeSpec::new(EdgeId::fixture("edge-source-sink"), source, sink, transfer));
+        scenario.tracked_metrics.insert(MetricKey::fixture("sink"));
+        scenario
+    }
+
+    /// Builds a linear source -> stage* -> sink pipeline with fixed unit transfers.
+    ///
+    /// `node_count` is clamped to at least two nodes (`source` and `sink`).
+    /// Intermediate nodes are named `stage-1`, `stage-2`, ... and use [`NodeKind::Pool`].
+    pub fn linear_pipeline(node_count: usize) -> Self {
+        let node_count = node_count.max(2);
+        let mut scenario = Self::new(ScenarioId::fixture("scenario-linear-pipeline"));
+        let mut node_ids = Vec::with_capacity(node_count);
+
+        for index in 0..node_count {
+            let (id, kind) = match index {
+                0 => ("source".to_string(), NodeKind::Source),
+                last if last == node_count - 1 => ("sink".to_string(), NodeKind::Sink),
+                _ => (format!("stage-{index}"), NodeKind::Pool),
+            };
+
+            let node_id = NodeId::fixture(id);
+            let node = if index == 0 {
+                NodeSpec::new(node_id.clone(), kind).with_initial_value(1.0)
+            } else {
+                NodeSpec::new(node_id.clone(), kind)
+            };
+
+            node_ids.push(node_id);
+            scenario = scenario.with_node(node);
+        }
+
+        for edge_index in 0..(node_ids.len() - 1) {
+            let from = node_ids[edge_index].clone();
+            let to = node_ids[edge_index + 1].clone();
+            let edge = EdgeSpec::new(
+                EdgeId::fixture(format!("edge-{edge_index}")),
+                from,
+                to,
+                TransferSpec::Fixed { amount: 1.0 },
+            );
+            scenario = scenario.with_edge(edge);
+        }
+
+        scenario.tracked_metrics.insert(MetricKey::fixture("sink"));
+        scenario
+    }
+
     /// Inserts or replaces a node by id.
     pub fn with_node(mut self, node: NodeSpec) -> Self {
         self.nodes.insert(node.id.clone(), node);
@@ -591,6 +650,27 @@ pub enum ExecutionMode {
     #[default]
     SingleThread,
     Rayon,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+/// Supported confidence levels for prediction interval diagnostics.
+pub enum ConfidenceLevel {
+    P90,
+    #[default]
+    P95,
+    P99,
+}
+
+impl ConfidenceLevel {
+    /// Returns the two-sided normal-distribution Z-score for this confidence level.
+    pub fn z_score(self) -> f64 {
+        match self {
+            Self::P90 => 1.644_853_626_951_472_2,
+            Self::P95 => 1.959_963_984_540_054,
+            Self::P99 => 2.575_829_303_548_900_4,
+        }
+    }
 }
 
 /// Capture policy for per-step node and metric snapshots.
@@ -629,15 +709,17 @@ impl CaptureConfig {
 ///
 /// # Example
 /// ```rust
-/// use anapao::types::RunConfig;
+/// use anapao::types::{CaptureConfig, RunConfig};
 ///
-/// let mut run = RunConfig::for_seed(42);
-/// run.max_steps = 250;
-/// run.capture.every_n_steps = 5;
-/// run.capture.include_step_zero = false;
+/// let run = RunConfig::for_seed(42).with_max_steps(250).with_capture(CaptureConfig {
+///     every_n_steps: 5,
+///     include_step_zero: false,
+///     ..CaptureConfig::default()
+/// });
 ///
 /// assert_eq!(run.seed, 42);
 /// assert_eq!(run.max_steps, 250);
+/// assert_eq!(run.capture.every_n_steps, 5);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunConfig {
@@ -657,6 +739,18 @@ impl RunConfig {
     pub fn for_seed(seed: u64) -> Self {
         Self { seed, ..Self::default() }
     }
+
+    /// Sets the run step limit.
+    pub fn with_max_steps(mut self, max_steps: u64) -> Self {
+        self.max_steps = max_steps;
+        self
+    }
+
+    /// Replaces capture settings for the run.
+    pub fn with_capture(mut self, capture: CaptureConfig) -> Self {
+        self.capture = capture;
+        self
+    }
 }
 
 /// Deterministic Monte Carlo controls for many runs.
@@ -665,16 +759,18 @@ impl RunConfig {
 ///
 /// # Example
 /// ```rust
-/// use anapao::types::{BatchConfig, ExecutionMode, RunConfig};
+/// use anapao::types::{BatchConfig, CaptureConfig, ExecutionMode, RunConfig};
 ///
-/// let mut batch = BatchConfig::for_runs(128);
-/// batch.base_seed = 7;
-/// batch.execution_mode = ExecutionMode::SingleThread;
-/// batch.run = RunConfig::for_seed(999);
-/// batch.run.max_steps = 50;
+/// let batch = BatchConfig::for_runs(128)
+///     .with_execution_mode(ExecutionMode::SingleThread)
+///     .with_run(RunConfig::for_seed(999))
+///     .with_max_steps(50)
+///     .with_capture(CaptureConfig::disabled());
 ///
 /// assert_eq!(batch.runs, 128);
-/// assert_eq!(batch.base_seed, 7);
+/// assert_eq!(batch.execution_mode, ExecutionMode::SingleThread);
+/// assert_eq!(batch.run.seed, 999);
+/// assert_eq!(batch.run.max_steps, 50);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BatchConfig {
@@ -699,6 +795,30 @@ impl BatchConfig {
     /// Creates a batch config from a requested run count and default options.
     pub fn for_runs(runs: u64) -> Self {
         Self { runs, ..Self::default() }
+    }
+
+    /// Sets execution mode for the batch.
+    pub fn with_execution_mode(mut self, execution_mode: ExecutionMode) -> Self {
+        self.execution_mode = execution_mode;
+        self
+    }
+
+    /// Replaces the default run template used for each batch run.
+    pub fn with_run(mut self, run: RunConfig) -> Self {
+        self.run = run;
+        self
+    }
+
+    /// Sets max steps on the batch run template.
+    pub fn with_max_steps(mut self, max_steps: u64) -> Self {
+        self.run.max_steps = max_steps;
+        self
+    }
+
+    /// Replaces capture settings on the batch run template.
+    pub fn with_capture(mut self, capture: CaptureConfig) -> Self {
+        self.run.capture = capture;
+        self
     }
 }
 
@@ -840,15 +960,24 @@ pub struct PredictionMetricIndicators {
     pub confidence_lower_95: f64,
     pub confidence_upper_95: f64,
     pub confidence_margin_95: f64,
+    pub confidence_lower_selected: f64,
+    pub confidence_upper_selected: f64,
+    pub confidence_margin_selected: f64,
     pub reliability_score: f64,
     pub convergence_delta: f64,
     pub convergence_ratio: f64,
+}
+
+fn default_prediction_selected_confidence_level() -> ConfidenceLevel {
+    ConfidenceLevel::default()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 /// Aggregated prediction diagnostics for one scenario.
 pub struct PredictionSummaryReport {
     pub scenario_id: ScenarioId,
+    #[serde(default = "default_prediction_selected_confidence_level")]
+    pub selected_confidence_level: ConfidenceLevel,
     pub metrics: BTreeMap<MetricKey, PredictionMetricIndicators>,
 }
 
@@ -858,7 +987,20 @@ impl PredictionSummaryReport {
         scenario_id: ScenarioId,
         metrics: BTreeMap<MetricKey, PredictionMetricIndicators>,
     ) -> Self {
-        Self { scenario_id, metrics }
+        Self::new_with_confidence_level(
+            scenario_id,
+            default_prediction_selected_confidence_level(),
+            metrics,
+        )
+    }
+
+    /// Creates a prediction summary report for an explicit confidence level.
+    pub fn new_with_confidence_level(
+        scenario_id: ScenarioId,
+        selected_confidence_level: ConfidenceLevel,
+        metrics: BTreeMap<MetricKey, PredictionMetricIndicators>,
+    ) -> Self {
+        Self { scenario_id, selected_confidence_level, metrics }
     }
 }
 
@@ -1205,6 +1347,7 @@ impl BatchReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Simulator;
 
     #[test]
     fn identifiers_validate_empty_and_control_values() {
@@ -1439,6 +1582,54 @@ mod tests {
     }
 
     #[test]
+    fn scenario_source_sink_constructor_reduces_setup_boilerplate() {
+        let scenario = ScenarioSpec::source_sink(TransferSpec::Fixed { amount: 2.0 });
+        assert_eq!(scenario.id.as_str(), "scenario-source-sink");
+
+        let source = scenario.nodes.get(&NodeId::fixture("source")).expect("source node");
+        assert_eq!(source.kind, NodeKind::Source);
+        assert_eq!(source.initial_value, 1.0);
+
+        let sink = scenario.nodes.get(&NodeId::fixture("sink")).expect("sink node");
+        assert_eq!(sink.kind, NodeKind::Sink);
+
+        let edge = scenario.edges.get(&EdgeId::fixture("edge-source-sink")).expect("edge");
+        assert_eq!(edge.transfer, TransferSpec::Fixed { amount: 2.0 });
+        assert!(scenario.tracked_metrics.contains(&MetricKey::fixture("sink")));
+    }
+
+    #[test]
+    fn scenario_linear_pipeline_constructor_builds_valid_chain() {
+        let scenario = ScenarioSpec::linear_pipeline(4);
+        assert_eq!(scenario.id.as_str(), "scenario-linear-pipeline");
+        assert_eq!(scenario.nodes.len(), 4);
+        assert_eq!(scenario.edges.len(), 3);
+        assert!(scenario.nodes.contains_key(&NodeId::fixture("source")));
+        assert!(scenario.nodes.contains_key(&NodeId::fixture("stage-1")));
+        assert!(scenario.nodes.contains_key(&NodeId::fixture("stage-2")));
+        assert!(scenario.nodes.contains_key(&NodeId::fixture("sink")));
+        assert!(scenario.edges.contains_key(&EdgeId::fixture("edge-0")));
+        assert!(scenario.edges.contains_key(&EdgeId::fixture("edge-1")));
+        assert!(scenario.edges.contains_key(&EdgeId::fixture("edge-2")));
+        assert!(scenario.tracked_metrics.contains(&MetricKey::fixture("sink")));
+    }
+
+    #[test]
+    fn scenario_convenience_constructors_are_compile_and_run_ready() {
+        for scenario in [
+            ScenarioSpec::source_sink(TransferSpec::Fixed { amount: 1.0 }),
+            ScenarioSpec::linear_pipeline(3),
+            ScenarioSpec::linear_pipeline(1),
+        ] {
+            let compiled =
+                Simulator::compile(scenario).expect("constructor scenario should compile");
+            let run = Simulator::run(&compiled, RunConfig::for_seed(42), None)
+                .expect("constructor scenario should run");
+            assert!(run.completed);
+        }
+    }
+
+    #[test]
     fn capture_and_run_defaults_are_stable() {
         let capture = CaptureConfig::default();
         assert_eq!(capture.every_n_steps, 1);
@@ -1451,6 +1642,44 @@ mod tests {
         assert_eq!(run.seed, 99);
         assert_eq!(run.max_steps, 100);
         assert_eq!(run.capture, CaptureConfig::default());
+
+        assert_eq!(ConfidenceLevel::default(), ConfidenceLevel::P95);
+    }
+
+    #[test]
+    fn run_config_builders_override_defaults() {
+        let capture = CaptureConfig {
+            every_n_steps: 5,
+            include_step_zero: false,
+            include_final_state: false,
+            ..CaptureConfig::default()
+        };
+        let run = RunConfig::for_seed(77).with_max_steps(250).with_capture(capture.clone());
+
+        assert_eq!(run.seed, 77);
+        assert_eq!(run.max_steps, 250);
+        assert_eq!(run.capture, capture);
+    }
+
+    #[test]
+    fn batch_config_builders_update_execution_and_run_template() {
+        let capture = CaptureConfig {
+            every_n_steps: 3,
+            include_step_zero: false,
+            include_final_state: true,
+            ..CaptureConfig::default()
+        };
+        let batch = BatchConfig::for_runs(12)
+            .with_execution_mode(ExecutionMode::SingleThread)
+            .with_run(RunConfig::for_seed(991))
+            .with_max_steps(40)
+            .with_capture(capture.clone());
+
+        assert_eq!(batch.runs, 12);
+        assert_eq!(batch.execution_mode, ExecutionMode::SingleThread);
+        assert_eq!(batch.run.seed, 991);
+        assert_eq!(batch.run.max_steps, 40);
+        assert_eq!(batch.run.capture, capture);
     }
 
     #[test]
@@ -1535,6 +1764,9 @@ mod tests {
                         confidence_lower_95: 0.0,
                         confidence_upper_95: 4.0,
                         confidence_margin_95: 2.0,
+                        confidence_lower_selected: 0.0,
+                        confidence_upper_selected: 4.0,
+                        confidence_margin_selected: 2.0,
                         reliability_score: 0.5,
                         convergence_delta: 1.0,
                         convergence_ratio: 0.5,
@@ -1556,6 +1788,9 @@ mod tests {
                         confidence_lower_95: 10.0,
                         confidence_upper_95: 10.0,
                         confidence_margin_95: 0.0,
+                        confidence_lower_selected: 10.0,
+                        confidence_upper_selected: 10.0,
+                        confidence_margin_selected: 0.0,
                         reliability_score: 1.0,
                         convergence_delta: 0.0,
                         convergence_ratio: 0.0,
@@ -1567,6 +1802,7 @@ mod tests {
         let encoded = serde_json::to_string(&report).expect("prediction report should serialize");
         let decoded: PredictionSummaryReport =
             serde_json::from_str(&encoded).expect("prediction report should deserialize");
+        assert_eq!(decoded.selected_confidence_level, ConfidenceLevel::P95);
         let keys: Vec<&str> = decoded.metrics.keys().map(MetricKey::as_str).collect();
         assert_eq!(keys, vec!["alpha", "beta"]);
     }

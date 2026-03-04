@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use anapao::batch::run_batch;
 use anapao::engine::run_single;
@@ -106,6 +106,43 @@ fn compiled_expanded_semantics() -> CompiledScenario {
         .expect("expanded semantics scenario should compile")
 }
 
+fn generated_determinism_property_scenario(case_index: u64) -> ScenarioSpec {
+    let source = NodeId::fixture(format!("source-{case_index}"));
+    let sink = NodeId::fixture(format!("sink-{case_index}"));
+    let edge = EdgeId::fixture(format!("edge-{case_index}"));
+
+    let mut scenario =
+        ScenarioSpec::new(ScenarioId::fixture(format!("perf-determinism-generated-{case_index}")))
+            .with_node(pool_with_mode(source.as_str(), 240.0 + case_index as f64))
+            .with_node(NodeSpec::new(sink.clone(), NodeKind::Pool))
+            .with_edge(EdgeSpec::new(
+                edge,
+                source,
+                sink.clone(),
+                TransferSpec::Expression { formula: "base + roll + step".to_string() },
+            ));
+
+    let roll_source = if case_index % 2 == 0 {
+        VariableSourceSpec::RandomInterval { min: 0, max: 4 }
+    } else {
+        VariableSourceSpec::RandomList { values: vec![0.0, 1.0, 2.0, 3.0, 4.0] }
+    };
+    scenario.variables = VariableRuntimeConfig {
+        update_timing: if case_index % 3 == 0 {
+            VariableUpdateTiming::RunStart
+        } else {
+            VariableUpdateTiming::EveryStep
+        },
+        sources: BTreeMap::from([
+            ("base".to_string(), VariableSourceSpec::Constant { value: (case_index % 3) as f64 }),
+            ("roll".to_string(), roll_source),
+        ]),
+    };
+    scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 3 + (case_index % 4) }];
+    scenario.tracked_metrics.insert(MetricKey::fixture(sink.as_str()));
+    scenario
+}
+
 #[test]
 fn perf_determinism_single_replay_expanded_semantics_stress() {
     let compiled = compiled_expanded_semantics();
@@ -152,6 +189,60 @@ fn perf_determinism_single_seed_variation_changes_randomized_trace() {
         report_a.final_node_values.get(&NodeId::fixture("sink_random")),
         report_b.final_node_values.get(&NodeId::fixture("sink_random")),
         "randomized sink outcome should vary across distinct seeds"
+    );
+}
+
+#[test]
+fn perf_determinism_generated_valid_scenarios_replay_by_seed_property() {
+    for case_index in 0_u64..12 {
+        let compiled = compile_scenario(&generated_determinism_property_scenario(case_index))
+            .expect("generated scenario should compile");
+        let seeds = [0_u64, 1_u64, 17_u64, 97_u64, 313_u64, case_index + 1_000_u64];
+        for seed in seeds {
+            let config = RunConfig { seed, max_steps: 64, capture: CaptureConfig::default() };
+            let run_a = run_single(&compiled, &config).expect("first replay run should succeed");
+            let run_b = run_single(&compiled, &config).expect("second replay run should succeed");
+            assert_eq!(
+                run_a, run_b,
+                "deterministic replay diverged for generated case {case_index} at seed {seed}"
+            );
+        }
+    }
+}
+
+#[test]
+fn perf_determinism_expression_cache_reuse_tracks_variable_context_changes() {
+    let compiled = compile_scenario(&generated_determinism_property_scenario(77))
+        .expect("generated scenario should compile");
+    let baseline_seed = 101_u64;
+    let config_for_seed =
+        |seed| RunConfig { seed, max_steps: 64, capture: CaptureConfig::default() };
+    let baseline = run_single(&compiled, &config_for_seed(baseline_seed))
+        .expect("baseline run should succeed");
+
+    let (alternate_seed, alternate_report) = ((baseline_seed + 1)..(baseline_seed + 2_048))
+        .map(|seed| {
+            let report = run_single(&compiled, &config_for_seed(seed))
+                .expect("alternate run should succeed");
+            (seed, report)
+        })
+        .find(|(_, report)| {
+            report.variable_snapshots != baseline.variable_snapshots
+                || report.transfers != baseline.transfers
+                || report.final_node_values != baseline.final_node_values
+        })
+        .expect("expected at least one seed with a different variable context");
+
+    assert!(
+        alternate_report != baseline,
+        "alternate seed {alternate_seed} should produce a different run context"
+    );
+
+    let baseline_replay = run_single(&compiled, &config_for_seed(baseline_seed))
+        .expect("baseline replay should succeed");
+    assert_eq!(
+        baseline_replay, baseline,
+        "baseline seed replay diverged after alternating run seed {alternate_seed}"
     );
 }
 

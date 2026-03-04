@@ -2,7 +2,18 @@
 
 use std::collections::BTreeMap;
 
-use crate::types::{MetricKey, PredictionMetricIndicators};
+use crate::types::{ConfidenceLevel, MetricKey, PredictionMetricIndicators};
+
+#[derive(Debug, Clone, PartialEq)]
+/// Streaming moments computed with Welford's online algorithm.
+pub struct StreamingMomentsSummary {
+    pub n: usize,
+    pub mean: f64,
+    pub variance: f64,
+    pub std_dev: f64,
+    pub min: f64,
+    pub max: f64,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 /// Summary statistics computed from a sample vector.
@@ -19,33 +30,90 @@ pub struct StatsSummary {
     pub p99: f64,
 }
 
-/// Computes descriptive statistics for finite values.
-pub fn summarize(values: &[f64]) -> Option<StatsSummary> {
-    if values.is_empty() || values.iter().any(|value| !value.is_finite()) {
-        return None;
+#[derive(Debug, Clone, Copy)]
+struct WelfordAccumulator {
+    n: usize,
+    mean: f64,
+    m2: f64,
+    min: f64,
+    max: f64,
+}
+
+impl WelfordAccumulator {
+    fn new() -> Self {
+        Self { n: 0, mean: 0.0, m2: 0.0, min: f64::INFINITY, max: f64::NEG_INFINITY }
     }
 
-    let n = values.len();
-    let mean = values.iter().sum::<f64>() / n as f64;
-    let variance = values
-        .iter()
-        .map(|value| {
-            let diff = *value - mean;
-            diff * diff
+    fn push(&mut self, value: f64) -> bool {
+        if !value.is_finite() {
+            return false;
+        }
+
+        if self.n == 0 {
+            self.n = 1;
+            self.mean = value;
+            self.m2 = 0.0;
+            self.min = value;
+            self.max = value;
+            return true;
+        }
+
+        self.n += 1;
+        let n = self.n as f64;
+        let delta = value - self.mean;
+        self.mean += delta / n;
+        let delta2 = value - self.mean;
+        self.m2 += delta * delta2;
+        self.min = self.min.min(value);
+        self.max = self.max.max(value);
+        true
+    }
+
+    fn finalize(self) -> Option<StreamingMomentsSummary> {
+        if self.n == 0 {
+            return None;
+        }
+
+        let variance = self.m2 / self.n as f64;
+        Some(StreamingMomentsSummary {
+            n: self.n,
+            mean: self.mean,
+            variance,
+            std_dev: variance.sqrt(),
+            min: self.min,
+            max: self.max,
         })
-        .sum::<f64>()
-        / n as f64;
+    }
+}
+
+/// Computes streaming moments in one pass without retaining all values.
+pub fn summarize_streaming<I>(values: I) -> Option<StreamingMomentsSummary>
+where
+    I: IntoIterator<Item = f64>,
+{
+    let mut accumulator = WelfordAccumulator::new();
+    for value in values {
+        if !accumulator.push(value) {
+            return None;
+        }
+    }
+    accumulator.finalize()
+}
+
+/// Computes descriptive statistics for finite values.
+pub fn summarize(values: &[f64]) -> Option<StatsSummary> {
+    let summary = summarize_streaming(values.iter().copied())?;
 
     let mut sorted_values = values.to_vec();
     sorted_values.sort_by(f64::total_cmp);
 
     Some(StatsSummary {
-        n,
-        mean,
-        variance,
-        std_dev: variance.sqrt(),
-        min: sorted_values[0],
-        max: sorted_values[n - 1],
+        n: summary.n,
+        mean: summary.mean,
+        variance: summary.variance,
+        std_dev: summary.std_dev,
+        min: summary.min,
+        max: summary.max,
         p50: percentile_sorted(&sorted_values, 50.0)?,
         p90: percentile_sorted(&sorted_values, 90.0)?,
         p95: percentile_sorted(&sorted_values, 95.0)?,
@@ -95,10 +163,11 @@ pub fn summarize_by_metric(
         .collect()
 }
 
-/// Computes a 95% confidence interval around the sample mean.
-pub fn mean_confidence_interval_95(values: &[f64]) -> Option<(f64, f64)> {
-    const Z_SCORE_95: f64 = 1.959_963_984_540_054;
-
+/// Computes a confidence interval around the sample mean for a configured confidence level.
+pub fn mean_confidence_interval(
+    values: &[f64],
+    confidence_level: ConfidenceLevel,
+) -> Option<(f64, f64)> {
     let summary = summarize(values)?;
     if summary.n == 1 {
         return Some((summary.mean, summary.mean));
@@ -107,19 +176,30 @@ pub fn mean_confidence_interval_95(values: &[f64]) -> Option<(f64, f64)> {
     let n = summary.n as f64;
     let sample_variance = summary.variance * n / (n - 1.0);
     let standard_error = sample_variance.sqrt() / n.sqrt();
-    let margin = Z_SCORE_95 * standard_error;
+    let margin = confidence_level.z_score() * standard_error;
     Some((summary.mean - margin, summary.mean + margin))
 }
 
-/// Derives prediction-oriented indicators for one metric sample.
-pub fn prediction_indicators(values: &[f64]) -> Option<PredictionMetricIndicators> {
+/// Computes a 95% confidence interval around the sample mean.
+pub fn mean_confidence_interval_95(values: &[f64]) -> Option<(f64, f64)> {
+    mean_confidence_interval(values, ConfidenceLevel::P95)
+}
+
+/// Derives prediction-oriented indicators for one metric sample and confidence level.
+pub fn prediction_indicators_with_confidence(
+    values: &[f64],
+    confidence_level: ConfidenceLevel,
+) -> Option<PredictionMetricIndicators> {
     let summary = summarize(values)?;
     let (confidence_lower_95, confidence_upper_95) = mean_confidence_interval_95(values)?;
     let confidence_margin_95 = (confidence_upper_95 - confidence_lower_95) / 2.0;
+    let (confidence_lower_selected, confidence_upper_selected) =
+        mean_confidence_interval(values, confidence_level)?;
+    let confidence_margin_selected = (confidence_upper_selected - confidence_lower_selected) / 2.0;
 
     let convergence_delta = leading_trailing_delta(values)?;
     let baseline = summary.mean.abs() + 1.0;
-    let relative_margin = confidence_margin_95 / baseline;
+    let relative_margin = confidence_margin_selected / baseline;
     let relative_dispersion = summary.std_dev / baseline;
     let reliability_score = 1.0 / (1.0 + relative_margin + relative_dispersion);
 
@@ -137,22 +217,39 @@ pub fn prediction_indicators(values: &[f64]) -> Option<PredictionMetricIndicator
         confidence_lower_95,
         confidence_upper_95,
         confidence_margin_95,
+        confidence_lower_selected,
+        confidence_upper_selected,
+        confidence_margin_selected,
         reliability_score,
         convergence_delta,
         convergence_ratio: convergence_delta / baseline,
     })
 }
 
+/// Derives prediction-oriented indicators for one metric sample using a 95% confidence interval.
+pub fn prediction_indicators(values: &[f64]) -> Option<PredictionMetricIndicators> {
+    prediction_indicators_with_confidence(values, ConfidenceLevel::P95)
+}
+
 /// Computes prediction indicators for each metric, dropping invalid samples.
-pub fn prediction_indicators_by_metric(
+pub fn prediction_indicators_by_metric_with_confidence(
     values_by_metric: BTreeMap<MetricKey, Vec<f64>>,
+    confidence_level: ConfidenceLevel,
 ) -> BTreeMap<MetricKey, PredictionMetricIndicators> {
     values_by_metric
         .into_iter()
         .filter_map(|(metric, values)| {
-            prediction_indicators(&values).map(|summary| (metric, summary))
+            prediction_indicators_with_confidence(&values, confidence_level)
+                .map(|summary| (metric, summary))
         })
         .collect()
+}
+
+/// Computes prediction indicators for each metric, dropping invalid samples.
+pub fn prediction_indicators_by_metric(
+    values_by_metric: BTreeMap<MetricKey, Vec<f64>>,
+) -> BTreeMap<MetricKey, PredictionMetricIndicators> {
+    prediction_indicators_by_metric_with_confidence(values_by_metric, ConfidenceLevel::P95)
 }
 
 fn leading_trailing_delta(values: &[f64]) -> Option<f64> {
@@ -178,10 +275,12 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        mean_confidence_interval_95, percentile_sorted, prediction_indicators,
-        prediction_indicators_by_metric, summarize, summarize_by_metric,
+        mean_confidence_interval, mean_confidence_interval_95, percentile_sorted,
+        prediction_indicators, prediction_indicators_by_metric,
+        prediction_indicators_by_metric_with_confidence, prediction_indicators_with_confidence,
+        summarize, summarize_by_metric, summarize_streaming,
     };
-    use crate::types::MetricKey;
+    use crate::types::{ConfidenceLevel, MetricKey};
 
     const EPSILON: f64 = 1e-12;
 
@@ -192,6 +291,12 @@ mod tests {
     #[test]
     fn summarize_returns_none_for_empty_input() {
         assert!(summarize(&[]).is_none());
+    }
+
+    #[test]
+    fn summarize_streaming_returns_none_for_empty_or_non_finite_input() {
+        assert!(summarize_streaming(std::iter::empty::<f64>()).is_none());
+        assert!(summarize_streaming([1.0, f64::NAN].into_iter()).is_none());
     }
 
     #[test]
@@ -218,6 +323,69 @@ mod tests {
         assert_close(summary.p90, 9.1);
         assert_close(summary.p95, 9.55);
         assert_close(summary.p99, 9.91);
+    }
+
+    #[test]
+    fn summarize_streaming_matches_legacy_moments_with_deterministic_tolerance() {
+        let values = (0..10_000)
+            .map(|index| {
+                let i = index as f64;
+                (i * 0.37).sin() * 40.0 + (index % 17) as f64 - 8.0
+            })
+            .collect::<Vec<_>>();
+        let streaming = summarize_streaming(values.iter().copied()).expect("streaming summary");
+
+        let mean = values.iter().sum::<f64>() / values.len() as f64;
+        let variance = values
+            .iter()
+            .map(|value| {
+                let diff = *value - mean;
+                diff * diff
+            })
+            .sum::<f64>()
+            / values.len() as f64;
+        let std_dev = variance.sqrt();
+        let min = values.iter().copied().fold(f64::INFINITY, f64::min);
+        let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+
+        assert_eq!(streaming.n, values.len());
+        assert!((streaming.mean - mean).abs() <= 1e-10, "mean drifted");
+        assert!((streaming.variance - variance).abs() <= 1e-10, "variance drifted");
+        assert!((streaming.std_dev - std_dev).abs() <= 1e-10, "std_dev drifted");
+        assert_close(streaming.min, min);
+        assert_close(streaming.max, max);
+    }
+
+    #[test]
+    fn summarize_streaming_accepts_large_iterators_without_collecting() {
+        let n = 50_000_usize;
+        let summary = summarize_streaming((1..=n).map(|value| value as f64))
+            .expect("streaming summary from iterator");
+
+        let n_f64 = n as f64;
+        let expected_mean = (n_f64 + 1.0) / 2.0;
+        let expected_variance = (n_f64 * n_f64 - 1.0) / 12.0;
+
+        assert_eq!(summary.n, n);
+        assert!((summary.mean - expected_mean).abs() <= 1e-9, "mean drifted");
+        assert!((summary.variance - expected_variance).abs() <= 1e-3, "variance drifted");
+        assert!((summary.std_dev - expected_variance.sqrt()).abs() <= 1e-9, "std_dev drifted");
+        assert_close(summary.min, 1.0);
+        assert_close(summary.max, n_f64);
+    }
+
+    #[test]
+    fn summarize_and_streaming_moments_agree() {
+        let values = [3.0, 8.0, 1.0, 4.0, 7.0];
+        let summary = summarize(&values).expect("summary");
+        let streaming = summarize_streaming(values).expect("streaming");
+
+        assert_eq!(summary.n, streaming.n);
+        assert_close(summary.mean, streaming.mean);
+        assert_close(summary.variance, streaming.variance);
+        assert_close(summary.std_dev, streaming.std_dev);
+        assert_close(summary.min, streaming.min);
+        assert_close(summary.max, streaming.max);
     }
 
     #[test]
@@ -258,6 +426,16 @@ mod tests {
     }
 
     #[test]
+    fn mean_confidence_interval_supports_90_95_and_99() {
+        let values = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let (_, upper_90) = mean_confidence_interval(&values, ConfidenceLevel::P90).expect("ci90");
+        let (_, upper_95) = mean_confidence_interval(&values, ConfidenceLevel::P95).expect("ci95");
+        let (_, upper_99) = mean_confidence_interval(&values, ConfidenceLevel::P99).expect("ci99");
+        assert!(upper_90 < upper_95);
+        assert!(upper_95 < upper_99);
+    }
+
+    #[test]
     fn mean_confidence_interval_95_single_value_has_zero_width() {
         let (lower, upper) = mean_confidence_interval_95(&[42.0]).expect("ci95");
         assert_close(lower, 42.0);
@@ -281,6 +459,9 @@ mod tests {
         assert_close(indicators.confidence_lower_95, 10.469_697_376_236_681);
         assert_close(indicators.confidence_upper_95, 15.530_302_623_763_319);
         assert_close(indicators.confidence_margin_95, 2.530_302_623_763_319);
+        assert_close(indicators.confidence_lower_selected, 10.469_697_376_236_681);
+        assert_close(indicators.confidence_upper_selected, 15.530_302_623_763_319);
+        assert_close(indicators.confidence_margin_selected, 2.530_302_623_763_319);
         assert!(indicators.reliability_score > 0.0 && indicators.reliability_score <= 1.0);
         assert_close(indicators.convergence_delta, 4.0);
         assert_close(indicators.convergence_ratio, 0.285_714_285_714_285_7);
@@ -308,5 +489,39 @@ mod tests {
         let beta_summary = summaries.get(&beta).expect("beta summary");
         assert_close(beta_summary.mean, 2.5);
         assert_close(beta_summary.convergence_delta, 2.0);
+    }
+
+    #[test]
+    fn prediction_indicators_with_confidence_updates_margin() {
+        let values = [10.0, 12.0, 14.0, 16.0];
+        let p90 =
+            prediction_indicators_with_confidence(&values, ConfidenceLevel::P90).expect("p90");
+        let p95 =
+            prediction_indicators_with_confidence(&values, ConfidenceLevel::P95).expect("p95");
+        let p99 =
+            prediction_indicators_with_confidence(&values, ConfidenceLevel::P99).expect("p99");
+
+        assert_close(p90.confidence_margin_95, p95.confidence_margin_95);
+        assert_close(p95.confidence_margin_95, p99.confidence_margin_95);
+        assert!(p90.confidence_margin_selected < p95.confidence_margin_selected);
+        assert!(p95.confidence_margin_selected < p99.confidence_margin_selected);
+    }
+
+    #[test]
+    fn prediction_indicators_by_metric_with_confidence_updates_margin() {
+        let metric = MetricKey::fixture("alpha");
+        let values_by_metric = BTreeMap::from([(metric.clone(), vec![1.0, 2.0, 3.0, 4.0])]);
+
+        let p90 = prediction_indicators_by_metric_with_confidence(
+            values_by_metric.clone(),
+            ConfidenceLevel::P90,
+        );
+        let p99 =
+            prediction_indicators_by_metric_with_confidence(values_by_metric, ConfidenceLevel::P99);
+
+        let alpha_90 = p90.get(&metric).expect("alpha p90");
+        let alpha_99 = p99.get(&metric).expect("alpha p99");
+        assert_close(alpha_90.confidence_margin_95, alpha_99.confidence_margin_95);
+        assert!(alpha_90.confidence_margin_selected < alpha_99.confidence_margin_selected);
     }
 }

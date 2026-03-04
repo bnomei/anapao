@@ -126,6 +126,10 @@ fn map_setup_to_run(error: SetupError) -> RunError {
         SetupError::InvalidGraphReference { graph, reference } => {
             RunError::InvalidRunConfig { name: graph, reason: reference }
         }
+        SetupError::CyclicGraph { graph, cycle_path } => RunError::InvalidRunConfig {
+            name: graph,
+            reason: format!("resource cycle detected: {}", cycle_path.join(" -> ")),
+        },
     }
 }
 
@@ -514,6 +518,17 @@ mod tests {
             mapped_graph,
             RunError::InvalidRunConfig { name, reason }
                 if name == "scenario[g].nodes" && reason == "missing edge"
+        ));
+
+        let mapped_cycle = map_setup_to_run(SetupError::CyclicGraph {
+            graph: "scenario[g].resource_connections".to_string(),
+            cycle_path: vec!["a".to_string(), "b".to_string(), "a".to_string()],
+        });
+        assert!(matches!(
+            mapped_cycle,
+            RunError::InvalidRunConfig { name, reason }
+                if name == "scenario[g].resource_connections"
+                    && reason == "resource cycle detected: a -> b -> a"
         ));
 
         let mapped_sink = map_sink_error(EventSinkError::custom("sink-x", "boom"));
