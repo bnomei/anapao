@@ -674,9 +674,9 @@ fn validate_queue_constraints(node_id: &NodeId, node: &NodeSpec) -> Result<(), S
 mod tests {
     use crate::error::SetupError;
     use crate::types::{
-        BatchConfig, CaptureConfig, ConfidenceLevel, ConnectionKind, DelayNodeConfig,
-        EdgeConnectionConfig, EdgeSpec, EndConditionSpec, ExecutionMode, MetricKey, NodeConfig,
-        NodeKind, NodeSpec, PoolNodeConfig, QueueNodeConfig, RunConfig, ScenarioId, ScenarioSpec,
+        BatchConfig, CaptureConfig, ConnectionKind, DelayNodeConfig, EdgeConnectionConfig,
+        EdgeSpec, EndConditionSpec, ExecutionMode, MetricKey, NodeConfig, NodeKind, NodeSpec,
+        PoolNodeConfig, QueueNodeConfig, RunConfig, ScenarioId, ScenarioSpec,
         StateConnectionConfig, StateConnectionRole, StateConnectionTarget, TransferSpec,
     };
 
@@ -1820,7 +1820,6 @@ mod tests {
             runs: 0,
             base_seed: 1,
             execution_mode: ExecutionMode::SingleThread,
-            confidence_level: ConfidenceLevel::default(),
             run: RunConfig::default(),
         };
 
@@ -1840,7 +1839,6 @@ mod tests {
             runs: 10,
             base_seed: 1,
             execution_mode: ExecutionMode::Rayon,
-            confidence_level: ConfidenceLevel::default(),
             run: RunConfig { seed: 99, max_steps: 0, capture: CaptureConfig::default() },
         };
 

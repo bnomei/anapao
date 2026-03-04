@@ -82,7 +82,6 @@ fn pikmin_diagram_batch_probability_band_for_good_ending_threshold() {
         runs: 256,
         base_seed: 0x5050,
         execution_mode: ExecutionMode::SingleThread,
-        confidence_level: Default::default(),
         run: RunConfig { seed: 0, max_steps: 60, capture: CaptureConfig::disabled() },
     };
     let expectations = vec![Expectation::ProbabilityBand {
@@ -112,7 +111,6 @@ fn pikmin_diagram_balance_guardrails_from_prediction_indicators() {
         runs: 256,
         base_seed: 0x6060,
         execution_mode: ExecutionMode::SingleThread,
-        confidence_level: Default::default(),
         run: RunConfig { seed: 0, max_steps: 60, capture: CaptureConfig::disabled() },
     };
 

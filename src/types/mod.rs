@@ -777,8 +777,6 @@ pub struct BatchConfig {
     pub runs: u64,
     pub base_seed: u64,
     pub execution_mode: ExecutionMode,
-    #[serde(default)]
-    pub confidence_level: ConfidenceLevel,
     pub run: RunConfig,
 }
 
@@ -788,7 +786,6 @@ impl Default for BatchConfig {
             runs: 1,
             base_seed: 0,
             execution_mode: ExecutionMode::default(),
-            confidence_level: ConfidenceLevel::default(),
             run: RunConfig::default(),
         }
     }
@@ -1293,8 +1290,6 @@ pub struct BatchReport {
     pub requested_runs: u64,
     pub completed_runs: u64,
     pub execution_mode: ExecutionMode,
-    #[serde(default)]
-    pub confidence_level: ConfidenceLevel,
     pub runs: Vec<BatchRunSummary>,
     pub aggregate_series: BTreeMap<MetricKey, SeriesTable>,
     pub manifest: Option<ManifestRef>,
@@ -1312,7 +1307,6 @@ impl BatchReport {
             requested_runs,
             completed_runs: 0,
             execution_mode,
-            confidence_level: ConfidenceLevel::default(),
             runs: Vec::new(),
             aggregate_series: BTreeMap::new(),
             manifest: None,
@@ -1627,8 +1621,7 @@ mod tests {
         assert_eq!(run.max_steps, 100);
         assert_eq!(run.capture, CaptureConfig::default());
 
-        let batch = BatchConfig::default();
-        assert_eq!(batch.confidence_level, ConfidenceLevel::P95);
+        assert_eq!(ConfidenceLevel::default(), ConfidenceLevel::P95);
     }
 
     #[test]

@@ -43,7 +43,6 @@ pub fn run_batch(
         requested_runs: config.runs,
         completed_runs: runs.len() as u64,
         execution_mode,
-        confidence_level: config.confidence_level,
         runs,
         aggregate_series,
         manifest: None,
@@ -148,8 +147,8 @@ mod tests {
 
     use crate::rng::derive_run_seed;
     use crate::types::{
-        BatchConfig, CaptureConfig, ConfidenceLevel, EdgeSpec, EndConditionSpec, ExecutionMode,
-        MetricKey, NodeId, NodeKind, NodeSpec, RunConfig, ScenarioId, ScenarioSpec, TransferSpec,
+        BatchConfig, CaptureConfig, EdgeSpec, EndConditionSpec, ExecutionMode, MetricKey, NodeId,
+        NodeKind, NodeSpec, RunConfig, ScenarioId, ScenarioSpec, TransferSpec,
     };
     use crate::validation::compile_scenario;
 
@@ -241,16 +240,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn run_batch_preserves_configured_confidence_level() {
-        let compiled = compiled_fixture();
-        let mut config = fixture_batch_config(4, 2024, ExecutionMode::SingleThread);
-        config.confidence_level = ConfidenceLevel::P99;
-
-        let report = run_batch(&compiled, &config).expect("batch run should succeed");
-        assert_eq!(report.confidence_level, ConfidenceLevel::P99);
-    }
-
     #[cfg(feature = "parallel")]
     #[test]
     fn run_batch_parallel_matches_sequential() {
@@ -304,7 +293,6 @@ mod tests {
             runs,
             base_seed,
             execution_mode,
-            confidence_level: ConfidenceLevel::default(),
             run: RunConfig {
                 // Batch execution should overwrite this with derived per-run seeds.
                 seed: 123_456,

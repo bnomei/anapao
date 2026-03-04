@@ -10,8 +10,8 @@ use crate::error::ArtifactError;
 use crate::events::{sort_events_by_order, RunEvent};
 use crate::stats::prediction_indicators_by_metric_with_confidence;
 use crate::types::{
-    ArtifactKind, ArtifactRef, BatchReport, HistoryIndexEntry, HistoryIndexReport, ManifestRef,
-    MetricKey, PredictionSummaryReport, ReplayIndexReport, ReplayRunIndex, RunReport,
+    ArtifactKind, ArtifactRef, BatchReport, ConfidenceLevel, HistoryIndexEntry, HistoryIndexReport,
+    ManifestRef, MetricKey, PredictionSummaryReport, ReplayIndexReport, ReplayRunIndex, RunReport,
     VariableSnapshot,
 };
 
@@ -151,11 +151,23 @@ pub fn write_batch_artifacts(
     output_dir: impl AsRef<Path>,
     batch_report: &BatchReport,
 ) -> Result<ManifestRef, ArtifactError> {
+    write_batch_artifacts_with_confidence_level(
+        output_dir,
+        batch_report,
+        ConfidenceLevel::default(),
+    )
+}
+
+pub fn write_batch_artifacts_with_confidence_level(
+    output_dir: impl AsRef<Path>,
+    batch_report: &BatchReport,
+    confidence_level: ConfidenceLevel,
+) -> Result<ManifestRef, ArtifactError> {
     let output_dir = output_dir.as_ref();
     ensure_output_dir(output_dir)?;
 
     write_series_csv(&output_dir.join(SERIES_FILE), &batch_report.aggregate_series)?;
-    let prediction = prediction_summary_report(batch_report);
+    let prediction = prediction_summary_report(batch_report, confidence_level);
     write_summary_csv(&output_dir.join(SUMMARY_FILE), &prediction)?;
     write_prediction_json(&output_dir.join(PREDICTION_FILE), &prediction)?;
 
@@ -583,7 +595,10 @@ fn replay_index_report(run_report: &RunReport, history: &HistoryIndexReport) -> 
     report
 }
 
-fn prediction_summary_report(batch_report: &BatchReport) -> PredictionSummaryReport {
+fn prediction_summary_report(
+    batch_report: &BatchReport,
+    confidence_level: ConfidenceLevel,
+) -> PredictionSummaryReport {
     let mut ordered_runs = batch_report.runs.iter().collect::<Vec<_>>();
     ordered_runs.sort_by(|left, right| {
         left.run_index.cmp(&right.run_index).then_with(|| left.seed.cmp(&right.seed))
@@ -598,10 +613,7 @@ fn prediction_summary_report(batch_report: &BatchReport) -> PredictionSummaryRep
 
     PredictionSummaryReport::new(
         batch_report.scenario_id.clone(),
-        prediction_indicators_by_metric_with_confidence(
-            values_by_metric,
-            batch_report.confidence_level,
-        ),
+        prediction_indicators_by_metric_with_confidence(values_by_metric, confidence_level),
     )
 }
 
@@ -627,7 +639,8 @@ mod tests {
     use super::{
         batch_generated_at_unix_seconds, batch_seed_strategy, encode_csv_field, format_f64,
         manifest_setup_hash, path_to_string, read_manifest_compat, read_manifest_compat_from_slice,
-        run_seed_strategy, stable_fnv1a_64, write_batch_artifacts, write_run_artifacts,
+        run_seed_strategy, stable_fnv1a_64, write_batch_artifacts,
+        write_batch_artifacts_with_confidence_level, write_run_artifacts,
         write_run_artifacts_with_assertions, ASSERTIONS_FILE, EVENTS_FILE, HISTORY_FILE,
         MANIFEST_FILE, PREDICTION_FILE, REPLAY_FILE, SERIES_FILE, SUMMARY_FILE, VARIABLES_FILE,
     };
@@ -911,13 +924,12 @@ mod tests {
         let tempdir_90 = tempdir().expect("tempdir90");
         let tempdir_99 = tempdir().expect("tempdir99");
 
-        let mut report_90 = BatchReport::new(
+        let mut report = BatchReport::new(
             ScenarioId::fixture("scenario-batch-ci90"),
             4,
             ExecutionMode::SingleThread,
         );
-        report_90.confidence_level = ConfidenceLevel::P90;
-        report_90.runs = vec![
+        report.runs = vec![
             BatchRunSummary {
                 run_index: 0,
                 seed: 10,
@@ -951,14 +963,20 @@ mod tests {
                 manifest: None,
             },
         ];
-        report_90.completed_runs = report_90.runs.len() as u64;
+        report.completed_runs = report.runs.len() as u64;
 
-        let mut report_99 = report_90.clone();
-        report_99.scenario_id = ScenarioId::fixture("scenario-batch-ci99");
-        report_99.confidence_level = ConfidenceLevel::P99;
-
-        write_batch_artifacts(tempdir_90.path(), &report_90).expect("write ci90 batch artifacts");
-        write_batch_artifacts(tempdir_99.path(), &report_99).expect("write ci99 batch artifacts");
+        write_batch_artifacts_with_confidence_level(
+            tempdir_90.path(),
+            &report,
+            ConfidenceLevel::P90,
+        )
+        .expect("write ci90 batch artifacts");
+        write_batch_artifacts_with_confidence_level(
+            tempdir_99.path(),
+            &report,
+            ConfidenceLevel::P99,
+        )
+        .expect("write ci99 batch artifacts");
 
         let prediction_90 = serde_json::from_slice::<PredictionSummaryReport>(
             &fs::read(tempdir_90.path().join(PREDICTION_FILE)).expect("read ci90 prediction"),

@@ -10,8 +10,8 @@ use serde::Deserialize;
 
 use crate::error::SetupError;
 use crate::types::{
-    BatchConfig, CaptureConfig, ConfidenceLevel, EdgeId, EdgeSpec, EndConditionSpec, ExecutionMode,
-    MetricKey, NodeId, NodeKind, NodeSpec, RunConfig, ScenarioId, ScenarioSpec, TransferSpec,
+    BatchConfig, CaptureConfig, EdgeId, EdgeSpec, EndConditionSpec, ExecutionMode, MetricKey,
+    NodeId, NodeKind, NodeSpec, RunConfig, ScenarioId, ScenarioSpec, TransferSpec,
 };
 use crate::validation::{compile_scenario, CompiledScenario};
 
@@ -109,7 +109,6 @@ pub fn fixture_batch_config(
         runs,
         base_seed,
         execution_mode,
-        confidence_level: ConfidenceLevel::default(),
         run: fixture_run_config(FIXTURE_RUN_SEED, FIXTURE_RUN_MAX_STEPS),
     }
 }

@@ -162,7 +162,6 @@ fn perf_determinism_batch_replay_stress_guardrails() {
         runs: 192,
         base_seed: 0xD1FF_EE11_u64,
         execution_mode: ExecutionMode::SingleThread,
-        confidence_level: Default::default(),
         run: RunConfig { seed: 999_999, max_steps: 64, capture: CaptureConfig::default() },
     };
 
@@ -212,7 +211,6 @@ fn perf_determinism_batch_parallel_matches_sequential_stress() {
         runs: 160,
         base_seed: 0x1A2B_3C4D_u64,
         execution_mode: ExecutionMode::SingleThread,
-        confidence_level: Default::default(),
         run: RunConfig { seed: 0, max_steps: 64, capture: CaptureConfig::default() },
     };
     let parallel = BatchConfig { execution_mode: ExecutionMode::Rayon, ..sequential.clone() };
@@ -234,7 +232,6 @@ fn perf_determinism_batch_parallel_request_falls_back_deterministically() {
         runs: 48,
         base_seed: 0x7777_u64,
         execution_mode: ExecutionMode::Rayon,
-        confidence_level: Default::default(),
         run: RunConfig { seed: 123, max_steps: 64, capture: CaptureConfig::default() },
     };
 
