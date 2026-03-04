@@ -59,11 +59,11 @@ pub fn write_run_artifacts(
 /// }];
 ///
 /// let mut sink = VecEventSink::new();
-/// let (report, assertion_report) = Simulator::run_with_assertions(
+/// let (report, assertion_report) = Simulator::run_with_assertions_and_sink(
 ///     &compiled,
-///     run_config,
+///     &run_config,
 ///     &expectations,
-///     Some(&mut sink),
+///     &mut sink,
 /// )
 /// .unwrap();
 ///
@@ -140,7 +140,7 @@ pub fn write_run_artifacts_with_assertions(
     }
 
     let setup_hash =
-        manifest_setup_hash(&manifest.scenario_id, &manifest.seed_strategy, &manifest.artifacts);
+        manifest_setup_hash(&manifest.scenario_id, &manifest.seed_strategy, &manifest.artifacts)?;
     manifest = manifest.with_setup_hash(setup_hash).with_inferred_sections();
     write_manifest_json(&output_dir.join(MANIFEST_FILE), &manifest)?;
 
@@ -188,7 +188,7 @@ pub fn write_batch_artifacts_with_confidence_level(
             artifact_ref(ArtifactKind::Summary, SUMMARY_FILE, CONTENT_TYPE_CSV),
         );
     let setup_hash =
-        manifest_setup_hash(&manifest.scenario_id, &manifest.seed_strategy, &manifest.artifacts);
+        manifest_setup_hash(&manifest.scenario_id, &manifest.seed_strategy, &manifest.artifacts)?;
     manifest = manifest.with_setup_hash(setup_hash).with_inferred_sections();
     write_manifest_json(&output_dir.join(MANIFEST_FILE), &manifest)?;
 
@@ -512,7 +512,7 @@ fn manifest_setup_hash(
     scenario_id: &crate::types::ScenarioId,
     seed_strategy: &str,
     artifacts: &BTreeMap<String, ArtifactRef>,
-) -> String {
+) -> Result<String, ArtifactError> {
     #[derive(Serialize)]
     struct Payload<'a> {
         scenario_id: &'a str,
@@ -521,9 +521,10 @@ fn manifest_setup_hash(
     }
 
     let payload = Payload { scenario_id: scenario_id.as_str(), seed_strategy, artifacts };
-    let bytes = serde_json::to_vec(&payload).unwrap_or_default();
+    let bytes = serde_json::to_vec(&payload)
+        .map_err(|source| ArtifactError::serialization(MANIFEST_FILE, source))?;
     let hash = stable_fnv1a_64(&bytes);
-    format!("{hash:016x}")
+    Ok(format!("{hash:016x}"))
 }
 
 fn stable_fnv1a_64(bytes: &[u8]) -> u64 {
@@ -1242,12 +1243,14 @@ mod tests {
             &ScenarioId::fixture("scenario-hash"),
             "single(seed=1)",
             &artifacts,
-        );
+        )
+        .expect("setup hash should serialize");
         let hash_b = manifest_setup_hash(
             &ScenarioId::fixture("scenario-hash"),
             "single(seed=1)",
             &artifacts,
-        );
+        )
+        .expect("setup hash should serialize");
         assert_eq!(hash_a, hash_b);
 
         assert_ne!(stable_fnv1a_64(b"a"), stable_fnv1a_64(b"b"));

@@ -144,17 +144,18 @@ impl GateRuntimeState {
         }
 
         let balancer = self.weighted_balancers.entry(gate_id.clone()).or_default();
-        if balancer.scores.len() != lanes.len() {
-            balancer.scores = vec![0.0; lanes.len()];
-        }
-        for (index, lane) in lanes.iter().enumerate() {
-            balancer.scores[index] = canonicalize_float(balancer.scores[index] + lane.weight);
+        let lane_keys = lanes.iter().map(GateRoutingLane::lane_key).collect::<Vec<_>>();
+        let active_keys = lane_keys.iter().cloned().collect::<BTreeSet<_>>();
+        balancer.scores.retain(|key, _| active_keys.contains(key));
+        for (lane_key, lane) in lane_keys.iter().zip(lanes.iter()) {
+            let score = balancer.scores.entry(lane_key.clone()).or_insert(0.0);
+            *score = canonicalize_float(*score + lane.weight);
         }
 
         let mut selected = None::<usize>;
         let mut selected_score = f64::NEG_INFINITY;
-        for (index, _) in lanes.iter().enumerate() {
-            let score = balancer.scores.get(index).copied().unwrap_or(0.0);
+        for (index, lane_key) in lane_keys.iter().enumerate() {
+            let score = balancer.scores.get(lane_key).copied().unwrap_or(0.0);
             if score > selected_score + f64::EPSILON {
                 selected_score = score;
                 selected = Some(index);
@@ -162,7 +163,7 @@ impl GateRuntimeState {
         }
 
         if let Some(target) = selected {
-            if let Some(score) = balancer.scores.get_mut(target) {
+            if let Some(score) = balancer.scores.get_mut(&lane_keys[target]) {
                 *score = canonicalize_float(*score - total_weight);
             }
             return Some(target);
@@ -211,7 +212,13 @@ impl GateRuntimeState {
 
 #[derive(Debug, Default)]
 struct GateWeightedBalancer {
-    scores: Vec<f64>,
+    scores: BTreeMap<GateLaneKey, f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum GateLaneKey {
+    Drop,
+    Edge(EdgeId),
 }
 
 fn edge_to_node_id(compiled: &CompiledScenario, edge_id: &EdgeId) -> NodeId {
@@ -228,6 +235,15 @@ struct GateRoutingLane {
     edge_id: Option<EdgeId>,
     to_index: Option<usize>,
     weight: f64,
+}
+
+impl GateRoutingLane {
+    fn lane_key(&self) -> GateLaneKey {
+        match &self.edge_id {
+            Some(edge_id) => GateLaneKey::Edge(edge_id.clone()),
+            None => GateLaneKey::Drop,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -504,6 +520,7 @@ fn run_single_internal(
     let mut state = init_state(compiled);
     let runtime = ExprRuntime::new();
     let expression_cache = EngineExpressionCache::from_compiled(compiled, &runtime);
+    let step_plan = EngineStepPlan::from_compiled(compiled);
     let mut variables = VariableRuntimeState::from_compiled(compiled, config.seed);
     let mut gates = GateRuntimeState::from_seed(config.seed);
     let mut timeline = TimelineRuntimeState::from_compiled(compiled, &state);
@@ -559,6 +576,7 @@ fn run_single_internal(
         let transfer_start = transfer_log.len();
         apply_edge_transfers(
             compiled,
+            &step_plan,
             &mut state,
             &runtime,
             &expression_cache,
@@ -696,6 +714,77 @@ struct StepTriggers {
     edges: BTreeSet<EdgeId>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TriggerTarget {
+    Node(NodeId),
+    Edge(EdgeId),
+}
+
+#[derive(Debug, Default)]
+struct EngineStepPlan {
+    resource_groups_by_controller: BTreeMap<NodeId, BTreeMap<TransferControl, Vec<EdgeId>>>,
+    passive_state_triggers: Vec<(NodeId, Vec<TriggerTarget>)>,
+    trigger_outputs_by_source: BTreeMap<NodeId, Vec<TriggerTarget>>,
+}
+
+impl EngineStepPlan {
+    fn from_compiled(compiled: &CompiledScenario) -> Self {
+        let mut plan = Self::default();
+
+        for edge_id in &compiled.edge_order {
+            let Some(edge) = compiled.scenario.edges.get(edge_id) else {
+                continue;
+            };
+            if !edge.enabled {
+                continue;
+            }
+
+            if matches!(edge.connection.kind, ConnectionKind::Resource) {
+                let target_action =
+                    normalized_action_mode(action_mode_for_node(compiled, &edge.to));
+                let (controller, control) = match target_action {
+                    TransferControl::PullAny | TransferControl::PullAll => {
+                        (edge.to.clone(), target_action)
+                    }
+                    TransferControl::PushAny | TransferControl::PushAll => (
+                        edge.from.clone(),
+                        normalized_action_mode(action_mode_for_node(compiled, &edge.from)),
+                    ),
+                };
+                plan.resource_groups_by_controller
+                    .entry(controller)
+                    .or_default()
+                    .entry(control)
+                    .or_default()
+                    .push(edge_id.clone());
+            }
+
+            if !matches!(edge.connection.kind, ConnectionKind::State)
+                || !matches!(edge.connection.state.role, StateConnectionRole::Trigger)
+            {
+                continue;
+            }
+
+            plan.trigger_outputs_by_source
+                .entry(edge.from.clone())
+                .or_default()
+                .extend(trigger_targets_for_state_connection(&edge.connection.state, &edge.to));
+
+            if !matches!(
+                gate_behavior_for_node(compiled, &edge.from),
+                GateBehavior::Trigger | GateBehavior::Mixed
+            ) {
+                plan.passive_state_triggers.push((
+                    edge.from.clone(),
+                    trigger_targets_for_state_connection(&edge.connection.state, &edge.to),
+                ));
+            }
+        }
+
+        plan
+    }
+}
+
 #[derive(Debug, Clone)]
 struct EdgeTransferPlan {
     edge_id: EdgeId,
@@ -710,6 +799,7 @@ struct EdgeTransferPlan {
 #[allow(clippy::too_many_arguments)]
 fn apply_edge_transfers(
     compiled: &CompiledScenario,
+    step_plan: &EngineStepPlan,
     state: &mut EngineState,
     runtime: &ExprRuntime,
     expression_cache: &EngineExpressionCache,
@@ -719,35 +809,13 @@ fn apply_edge_transfers(
     step: u64,
     transfer_log: &mut Vec<TransferRecord>,
 ) -> Result<(), RunError> {
-    let mut triggers = collect_step_triggers(compiled, state);
-    let mut groups: BTreeMap<(NodeId, TransferControl), Vec<EdgeId>> = BTreeMap::new();
-
-    for edge_id in &compiled.edge_order {
-        let edge = compiled
-            .scenario
-            .edges
-            .get(edge_id)
-            .expect("compiled.edge_order must reference known edges");
-        if !edge.enabled || !matches!(edge.connection.kind, ConnectionKind::Resource) {
-            continue;
-        }
-
-        let target_action = normalized_action_mode(action_mode_for_node(compiled, &edge.to));
-        let (controller, control) = match target_action {
-            TransferControl::PullAny | TransferControl::PullAll => (edge.to.clone(), target_action),
-            TransferControl::PushAny | TransferControl::PushAll => (
-                edge.from.clone(),
-                normalized_action_mode(action_mode_for_node(compiled, &edge.from)),
-            ),
-        };
-
-        groups.entry((controller, control)).or_default().push(edge_id.clone());
-    }
+    let mut triggers = collect_step_triggers(compiled, step_plan, state);
 
     for node_id in &compiled.node_order {
         let gate_behavior = gate_behavior_for_node(compiled, node_id);
         let mut node_acted = false;
         let mut had_resource_groups = false;
+        let node_groups = step_plan.resource_groups_by_controller.get(node_id);
 
         for control in [
             TransferControl::PullAny,
@@ -755,8 +823,7 @@ fn apply_edge_transfers(
             TransferControl::PushAny,
             TransferControl::PushAll,
         ] {
-            let key = (node_id.clone(), control);
-            let Some(edge_ids) = groups.get(&key) else {
+            let Some(edge_ids) = node_groups.and_then(|groups| groups.get(&control)) else {
                 continue;
             };
             had_resource_groups = true;
@@ -812,7 +879,7 @@ fn apply_edge_transfers(
 
         match gate_behavior {
             GateBehavior::Mixed if node_acted => {
-                append_node_trigger_outputs(compiled, node_id, &mut triggers);
+                append_node_trigger_outputs(step_plan, node_id, &mut triggers);
             }
             GateBehavior::Trigger => {
                 let trigger_gate_acted = if had_resource_groups {
@@ -821,7 +888,7 @@ fn apply_edge_transfers(
                     controller_can_fire(compiled, state, node_id, &[], &triggers)
                 };
                 if trigger_gate_acted {
-                    append_node_trigger_outputs(compiled, node_id, &mut triggers);
+                    append_node_trigger_outputs(step_plan, node_id, &mut triggers);
                 }
             }
             GateBehavior::None | GateBehavior::Sorting | GateBehavior::Mixed => {}
@@ -1330,77 +1397,61 @@ fn apply_transfer_plan(
     });
 }
 
-fn collect_step_triggers(compiled: &CompiledScenario, state: &EngineState) -> StepTriggers {
+fn collect_step_triggers(
+    compiled: &CompiledScenario,
+    step_plan: &EngineStepPlan,
+    state: &EngineState,
+) -> StepTriggers {
     let mut triggers = StepTriggers::default();
 
-    for edge_id in &compiled.edge_order {
-        let Some(edge) = compiled.scenario.edges.get(edge_id) else {
-            continue;
-        };
-        if !edge.enabled || !matches!(edge.connection.kind, ConnectionKind::State) {
-            continue;
-        }
-
-        let state_config = &edge.connection.state;
-        if !matches!(state_config.role, StateConnectionRole::Trigger) {
-            continue;
-        }
-
-        // Trigger and mixed gates emit trigger-side outputs when they act, not from stored value.
-        if matches!(
-            gate_behavior_for_node(compiled, &edge.from),
-            GateBehavior::Trigger | GateBehavior::Mixed
-        ) {
-            continue;
-        }
-
-        let source_state = node_value(compiled, state, &edge.from);
+    for (source_node_id, targets) in &step_plan.passive_state_triggers {
+        let source_state = node_value(compiled, state, source_node_id);
         if !source_state.is_finite() || source_state <= 0.0 {
             continue;
         }
-
-        append_trigger_target(state_config, &edge.to, &mut triggers);
+        append_trigger_targets(targets, &mut triggers);
     }
 
     triggers
 }
 
 fn append_node_trigger_outputs(
-    compiled: &CompiledScenario,
+    step_plan: &EngineStepPlan,
     node_id: &NodeId,
     triggers: &mut StepTriggers,
 ) {
-    for edge_id in &compiled.edge_order {
-        let Some(edge) = compiled.scenario.edges.get(edge_id) else {
-            continue;
-        };
-        if !edge.enabled
-            || edge.from != *node_id
-            || !matches!(edge.connection.kind, ConnectionKind::State)
-            || !matches!(edge.connection.state.role, StateConnectionRole::Trigger)
-        {
-            continue;
-        }
-
-        append_trigger_target(&edge.connection.state, &edge.to, triggers);
+    if let Some(targets) = step_plan.trigger_outputs_by_source.get(node_id) {
+        append_trigger_targets(targets, triggers);
     }
 }
 
-fn append_trigger_target(
+fn trigger_targets_for_state_connection(
     state_config: &crate::types::StateConnectionConfig,
     edge_to: &NodeId,
-    triggers: &mut StepTriggers,
-) {
+) -> Vec<TriggerTarget> {
     match state_config.target {
-        StateConnectionTarget::Node => {
-            triggers.nodes.insert(edge_to.clone());
-        }
+        StateConnectionTarget::Node => vec![TriggerTarget::Node(edge_to.clone())],
         StateConnectionTarget::ResourceConnection | StateConnectionTarget::StateConnection => {
             if let Some(target_edge_id) = state_config.target_connection.clone() {
-                triggers.edges.insert(target_edge_id);
+                vec![TriggerTarget::Edge(target_edge_id)]
+            } else {
+                Vec::new()
             }
         }
-        StateConnectionTarget::Formula => {}
+        StateConnectionTarget::Formula => Vec::new(),
+    }
+}
+
+fn append_trigger_targets(targets: &[TriggerTarget], triggers: &mut StepTriggers) {
+    for target in targets {
+        match target {
+            TriggerTarget::Node(node_id) => {
+                triggers.nodes.insert(node_id.clone());
+            }
+            TriggerTarget::Edge(edge_id) => {
+                triggers.edges.insert(edge_id.clone());
+            }
+        }
     }
 }
 
@@ -1773,7 +1824,7 @@ fn total_node_value(state: &EngineState) -> f64 {
 }
 
 fn metric_node_index(compiled: &CompiledScenario, metric: &MetricKey) -> Option<usize> {
-    compiled.node_order.iter().position(|node_id| node_id.as_str() == metric.as_str())
+    compiled.metric_index_by_name.get(metric.as_str()).copied()
 }
 
 fn node_value(compiled: &CompiledScenario, state: &EngineState, node_id: &NodeId) -> f64 {
@@ -1945,7 +1996,7 @@ mod tests {
     };
     use crate::validation::compile_scenario;
 
-    use super::{run_single, VALUE_SCALE, VARIABLE_RNG_SALT};
+    use super::{run_single, GateRoutingLane, GateRuntimeState, VALUE_SCALE, VARIABLE_RNG_SALT};
 
     #[test]
     fn run_single_is_deterministic_for_same_inputs() {
@@ -2008,6 +2059,31 @@ mod tests {
         assert_eq!(report.final_node_values.get(&sink_a), Some(&5.0));
         assert_eq!(report.final_node_values.get(&sink_b), Some(&5.0));
         assert_eq!(report.steps_executed, 1);
+    }
+
+    #[test]
+    fn deterministic_gate_balancer_uses_lane_identity_not_position() {
+        let gate_id = NodeId::fixture("gate");
+        let mut gates = GateRuntimeState::from_seed(42);
+
+        let lane = |edge_id: &str| GateRoutingLane {
+            edge_id: Some(EdgeId::fixture(edge_id)),
+            to_index: Some(0),
+            weight: 1.0,
+        };
+
+        let first = gates
+            .pick_deterministic_target(&gate_id, &[lane("edge-a"), lane("edge-b")])
+            .expect("first pick should exist");
+        assert_eq!(first, 0, "first tie should pick the first lane");
+
+        let second = gates
+            .pick_deterministic_target(&gate_id, &[lane("edge-c"), lane("edge-d")])
+            .expect("second pick should exist");
+        assert_eq!(
+            second, 0,
+            "new lane identities should not inherit prior index-scoped balancer history"
+        );
     }
 
     #[test]

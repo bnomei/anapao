@@ -9,7 +9,9 @@ use anapao::testkit::pikmin::{
     pikmin_scenario_for_profile, ship_parts_metric_key, ship_parts_node_id, PikminFixtureProfile,
     PikminFixtureTuning,
 };
-use anapao::types::{BatchConfig, CaptureConfig, ExecutionMode, MetricKey, RunConfig};
+use anapao::types::{
+    BatchConfig, BatchRunTemplate, CaptureConfig, ExecutionMode, MetricKey, RunConfig,
+};
 use anapao::Simulator;
 
 fn pikmin_scenario_from_profile(profile: PikminFixtureProfile) -> anapao::types::ScenarioSpec {
@@ -22,7 +24,7 @@ fn pikmin_diagram_bad_ending_hits_day_limit_first() {
     let compiled = Simulator::compile(scenario).expect("pikmin diagram scenario should compile");
     let config = RunConfig { seed: 2026, max_steps: 60, capture: CaptureConfig::disabled() };
 
-    let report = Simulator::run(&compiled, config, None).expect("run should succeed");
+    let report = Simulator::run(&compiled, &config).expect("run should succeed");
     let days_spent = days_spent_node_id();
     let ship_parts = ship_parts_node_id();
 
@@ -41,7 +43,7 @@ fn pikmin_diagram_good_ending_reaches_ship_parts_before_day_limit() {
     let compiled = Simulator::compile(scenario).expect("pikmin diagram scenario should compile");
     let config = RunConfig { seed: 2026, max_steps: 60, capture: CaptureConfig::disabled() };
 
-    let report = Simulator::run(&compiled, config, None).expect("run should succeed");
+    let report = Simulator::run(&compiled, &config).expect("run should succeed");
     let days_spent = days_spent_node_id();
     let ship_parts = ship_parts_node_id();
     let pikmin = anapao::testkit::pikmin::pikmin_node_id();
@@ -66,8 +68,8 @@ fn pikmin_diagram_is_reproducible_for_fixed_seed() {
     let compiled = Simulator::compile(scenario).expect("pikmin diagram scenario should compile");
     let config = RunConfig { seed: 777, max_steps: 60, capture: CaptureConfig::disabled() };
 
-    let report_a = Simulator::run(&compiled, config.clone(), None).expect("first run should work");
-    let report_b = Simulator::run(&compiled, config, None).expect("second run should work");
+    let report_a = Simulator::run(&compiled, &config).expect("first run should work");
+    let report_b = Simulator::run(&compiled, &config).expect("second run should work");
     assert_eq!(report_a.steps_executed, report_b.steps_executed);
     assert_eq!(report_a.completed, report_b.completed);
     assert_eq!(report_a.final_node_values, report_b.final_node_values);
@@ -82,7 +84,7 @@ fn pikmin_diagram_batch_probability_band_for_good_ending_threshold() {
         runs: 256,
         base_seed: 0x5050,
         execution_mode: ExecutionMode::SingleThread,
-        run: RunConfig { seed: 0, max_steps: 60, capture: CaptureConfig::disabled() },
+        run_template: BatchRunTemplate { max_steps: 60, capture: CaptureConfig::disabled() },
     };
     let expectations = vec![Expectation::ProbabilityBand {
         metric: ship_parts_metric_key(),
@@ -93,7 +95,7 @@ fn pikmin_diagram_batch_probability_band_for_good_ending_threshold() {
     }];
 
     let (_report, assertion_report) =
-        Simulator::run_batch_with_assertions(&compiled, batch_config, &expectations, None)
+        Simulator::run_batch_with_assertions(&compiled, &batch_config, &expectations)
             .expect("batch run with assertions should succeed");
 
     assert!(
@@ -111,11 +113,11 @@ fn pikmin_diagram_balance_guardrails_from_prediction_indicators() {
         runs: 256,
         base_seed: 0x6060,
         execution_mode: ExecutionMode::SingleThread,
-        run: RunConfig { seed: 0, max_steps: 60, capture: CaptureConfig::disabled() },
+        run_template: BatchRunTemplate { max_steps: 60, capture: CaptureConfig::disabled() },
     };
 
     let batch_report =
-        Simulator::run_batch(&compiled, batch_config, None).expect("batch run should succeed");
+        Simulator::run_batch(&compiled, &batch_config).expect("batch run should succeed");
 
     let mut values_by_metric = BTreeMap::<MetricKey, Vec<f64>>::new();
     for run in &batch_report.runs {
@@ -160,7 +162,7 @@ fn pikmin_diagram_event_contract_contains_core_phases_and_stable_ordering() {
 
     let mut sink = VecEventSink::new();
     let (report, assertion_report) =
-        Simulator::run_with_assertions(&compiled, run_config, &expectations, Some(&mut sink))
+        Simulator::run_with_assertions_and_sink(&compiled, &run_config, &expectations, &mut sink)
             .expect("run with assertions should succeed");
     assert!(assertion_report.is_success());
 
@@ -259,15 +261,11 @@ fn pikmin_diagram_event_stream_is_byte_stable_for_fixed_seed() {
     let mut sink_a = VecEventSink::new();
     let mut sink_b = VecEventSink::new();
 
-    let (_report_a, assertion_a) = Simulator::run_with_assertions(
-        &compiled,
-        run_config.clone(),
-        &expectations,
-        Some(&mut sink_a),
-    )
-    .expect("first run should succeed");
+    let (_report_a, assertion_a) =
+        Simulator::run_with_assertions_and_sink(&compiled, &run_config, &expectations, &mut sink_a)
+            .expect("first run should succeed");
     let (_report_b, assertion_b) =
-        Simulator::run_with_assertions(&compiled, run_config, &expectations, Some(&mut sink_b))
+        Simulator::run_with_assertions_and_sink(&compiled, &run_config, &expectations, &mut sink_b)
             .expect("second run should succeed");
 
     assert_eq!(assertion_a.results, assertion_b.results);

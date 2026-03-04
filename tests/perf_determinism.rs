@@ -4,9 +4,9 @@ use anapao::batch::run_batch;
 use anapao::engine::run_single;
 use anapao::rng::derive_run_seed;
 use anapao::types::{
-    ActionMode, BatchConfig, CaptureConfig, DelayNodeConfig, EdgeId, EdgeSpec, EndConditionSpec,
-    ExecutionMode, MetricKey, NodeConfig, NodeId, NodeKind, NodeModeConfig, NodeSpec,
-    QueueNodeConfig, RunConfig, ScenarioId, ScenarioSpec, TransferSpec, TriggerMode,
+    ActionMode, BatchConfig, BatchRunTemplate, CaptureConfig, DelayNodeConfig, EdgeId, EdgeSpec,
+    EndConditionSpec, ExecutionMode, MetricKey, NodeConfig, NodeId, NodeKind, NodeModeConfig,
+    NodeSpec, QueueNodeConfig, RunConfig, ScenarioId, ScenarioSpec, TransferSpec, TriggerMode,
     VariableRuntimeConfig, VariableSourceSpec, VariableUpdateTiming,
 };
 use anapao::validation::{compile_scenario, CompiledScenario};
@@ -253,7 +253,7 @@ fn perf_determinism_batch_replay_stress_guardrails() {
         runs: 192,
         base_seed: 0xD1FF_EE11_u64,
         execution_mode: ExecutionMode::SingleThread,
-        run: RunConfig { seed: 999_999, max_steps: 64, capture: CaptureConfig::default() },
+        run_template: BatchRunTemplate { max_steps: 64, capture: CaptureConfig::default() },
     };
 
     let report_a = run_batch(&compiled, &config).expect("batch run should succeed");
@@ -302,7 +302,7 @@ fn perf_determinism_batch_parallel_matches_sequential_stress() {
         runs: 160,
         base_seed: 0x1A2B_3C4D_u64,
         execution_mode: ExecutionMode::SingleThread,
-        run: RunConfig { seed: 0, max_steps: 64, capture: CaptureConfig::default() },
+        run_template: BatchRunTemplate { max_steps: 64, capture: CaptureConfig::default() },
     };
     let parallel = BatchConfig { execution_mode: ExecutionMode::Rayon, ..sequential.clone() };
 
@@ -323,7 +323,7 @@ fn perf_determinism_batch_parallel_request_falls_back_deterministically() {
         runs: 48,
         base_seed: 0x7777_u64,
         execution_mode: ExecutionMode::Rayon,
-        run: RunConfig { seed: 123, max_steps: 64, capture: CaptureConfig::default() },
+        run_template: BatchRunTemplate { max_steps: 64, capture: CaptureConfig::default() },
     };
 
     let report = run_batch(&compiled, &config).expect("batch run should succeed");

@@ -10,8 +10,9 @@ use serde::Deserialize;
 
 use crate::error::SetupError;
 use crate::types::{
-    BatchConfig, CaptureConfig, EdgeId, EdgeSpec, EndConditionSpec, ExecutionMode, MetricKey,
-    NodeId, NodeKind, NodeSpec, RunConfig, ScenarioId, ScenarioSpec, TransferSpec,
+    BatchConfig, BatchRunTemplate, CaptureConfig, EdgeId, EdgeSpec, EndConditionSpec,
+    ExecutionMode, MetricKey, NodeId, NodeKind, NodeSpec, RunConfig, ScenarioId, ScenarioSpec,
+    TransferSpec,
 };
 use crate::validation::{compile_scenario, CompiledScenario};
 
@@ -109,7 +110,10 @@ pub fn fixture_batch_config(
         runs,
         base_seed,
         execution_mode,
-        run: fixture_run_config(FIXTURE_RUN_SEED, FIXTURE_RUN_MAX_STEPS),
+        run_template: BatchRunTemplate {
+            max_steps: FIXTURE_RUN_MAX_STEPS,
+            capture: CaptureConfig::default(),
+        },
     }
 }
 
@@ -276,7 +280,8 @@ mod tests {
         assert_eq!(batch.runs, FIXTURE_BATCH_RUNS);
         assert_eq!(batch.base_seed, FIXTURE_BATCH_BASE_SEED);
         assert_eq!(batch.execution_mode, ExecutionMode::SingleThread);
-        assert_eq!(batch.run, run);
+        assert_eq!(batch.run_template.max_steps, run.max_steps);
+        assert_eq!(batch.run_template.capture, run.capture);
     }
 
     #[test]
@@ -285,8 +290,7 @@ mod tests {
         assert_eq!(batch.runs, 9);
         assert_eq!(batch.base_seed, 123);
         assert_eq!(batch.execution_mode, ExecutionMode::Rayon);
-        assert_eq!(batch.run.seed, FIXTURE_RUN_SEED);
-        assert_eq!(batch.run.max_steps, FIXTURE_RUN_MAX_STEPS);
+        assert_eq!(batch.run_template.max_steps, FIXTURE_RUN_MAX_STEPS);
     }
 
     #[test]

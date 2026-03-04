@@ -41,6 +41,7 @@ pub fn run_batch(
     Ok(BatchReport {
         scenario_id: compiled.scenario.id.clone(),
         requested_runs: config.runs,
+        // `completed_runs` tracks how many run summaries are present in the report payload.
         completed_runs: runs.len() as u64,
         execution_mode,
         runs,
@@ -73,9 +74,7 @@ fn execute_run(
 }
 
 fn per_run_config(config: &BatchConfig, run_index: u64) -> RunConfig {
-    let mut run_config = config.run.clone();
-    run_config.seed = derive_run_seed(config.base_seed, run_index);
-    run_config
+    config.run_template.to_run_config(derive_run_seed(config.base_seed, run_index))
 }
 
 #[cfg(feature = "parallel")]
@@ -147,8 +146,8 @@ mod tests {
 
     use crate::rng::derive_run_seed;
     use crate::types::{
-        BatchConfig, CaptureConfig, EdgeSpec, EndConditionSpec, ExecutionMode, MetricKey, NodeId,
-        NodeKind, NodeSpec, RunConfig, ScenarioId, ScenarioSpec, TransferSpec,
+        BatchConfig, BatchRunTemplate, CaptureConfig, EdgeSpec, EndConditionSpec, ExecutionMode,
+        MetricKey, NodeId, NodeKind, NodeSpec, ScenarioId, ScenarioSpec, TransferSpec,
     };
     use crate::validation::compile_scenario;
 
@@ -221,11 +220,10 @@ mod tests {
     }
 
     #[test]
-    fn run_batch_rewrites_template_seed_for_every_run() {
+    fn run_batch_derives_seed_for_every_run() {
         let compiled = compiled_fixture();
-        let mut config =
+        let config =
             fixture_batch_config(64, 0x1234_5678_9ABC_DEF0_u64, ExecutionMode::SingleThread);
-        config.run.seed = u64::MAX;
 
         let report = run_batch(&compiled, &config).expect("batch run should succeed");
         let mut seen = HashSet::with_capacity(report.runs.len());
@@ -293,12 +291,7 @@ mod tests {
             runs,
             base_seed,
             execution_mode,
-            run: RunConfig {
-                // Batch execution should overwrite this with derived per-run seeds.
-                seed: 123_456,
-                max_steps: 10,
-                capture: CaptureConfig::default(),
-            },
+            run_template: BatchRunTemplate { max_steps: 10, capture: CaptureConfig::default() },
         }
     }
 

@@ -12,6 +12,7 @@
 //! - `ScenarioSpec`: declarative simulation graph (nodes, edges, end conditions, metrics).
 //! - `RunConfig`: deterministic single-run controls (`seed`, `max_steps`, capture options).
 //! - `BatchConfig`: deterministic Monte Carlo controls (`runs`, `base_seed`, execution mode).
+//! - `BatchRunTemplate`: seed-agnostic per-run defaults used by `BatchConfig`.
 //! - `Expectation`: typed assertions evaluated against run or batch reports.
 //! - Artifacts: manifested CI-friendly outputs (`events.jsonl`, `series.csv`, `summary.csv`, ...).
 //!
@@ -21,7 +22,7 @@
 //! use anapao::types::MetricKey;
 //!
 //! let compiled = Simulator::compile(testkit::fixture_scenario()).unwrap();
-//! let report = Simulator::run(&compiled, testkit::deterministic_run_config(), None).unwrap();
+//! let report = Simulator::run(&compiled, &testkit::deterministic_run_config()).unwrap();
 //!
 //! assert!(report.completed);
 //! assert_eq!(report.steps_executed, 3);
@@ -34,7 +35,7 @@
 //! use anapao::types::MetricKey;
 //!
 //! let compiled = Simulator::compile(testkit::fixture_scenario()).unwrap();
-//! let batch = Simulator::run_batch(&compiled, testkit::deterministic_batch_config(), None).unwrap();
+//! let batch = Simulator::run_batch(&compiled, &testkit::deterministic_batch_config()).unwrap();
 //!
 //! assert_eq!(batch.completed_runs, batch.requested_runs);
 //! assert!(batch.runs.windows(2).all(|window| window[0].run_index < window[1].run_index));
@@ -56,11 +57,11 @@
 //! }];
 //!
 //! let mut sink = VecEventSink::new();
-//! let (_report, assertion_report) = Simulator::run_with_assertions(
+//! let (_report, assertion_report) = Simulator::run_with_assertions_and_sink(
 //!     &compiled,
-//!     testkit::deterministic_run_config(),
+//!     &testkit::deterministic_run_config(),
 //!     &expectations,
-//!     Some(&mut sink),
+//!     &mut sink,
 //! )
 //! .unwrap();
 //!
@@ -93,11 +94,11 @@
 //!
 //! // 3) Run simulation and evaluate assertions.
 //! let mut sink = VecEventSink::new();
-//! let (run_report, assertion_report) = Simulator::run_with_assertions(
+//! let (run_report, assertion_report) = Simulator::run_with_assertions_and_sink(
 //!     &compiled,
-//!     run_config,
+//!     &run_config,
 //!     &expectations,
-//!     Some(&mut sink),
+//!     &mut sink,
 //! )
 //! .unwrap();
 //! assert!(assertion_report.is_success());
@@ -123,6 +124,7 @@ pub mod engine;
 pub mod error;
 pub mod events;
 pub mod expr;
+pub mod prelude;
 pub mod rng;
 pub mod simulator;
 pub mod stats;
@@ -134,7 +136,13 @@ pub mod validation;
 #[cfg(feature = "analysis-polars")]
 pub mod analysis;
 
+pub use assertions::{AssertionReport, Expectation, MetricSelector};
+pub use events::{EventSink, VecEventSink};
 pub use simulator::Simulator;
+pub use types::{
+    BatchConfig, BatchReport, BatchRunTemplate, CaptureConfig, EndConditionSpec, ExecutionMode,
+    MetricKey, RunConfig, RunReport, ScenarioSpec, TransferSpec,
+};
 
 #[cfg(doctest)]
 #[doc = include_str!("../README.md")]

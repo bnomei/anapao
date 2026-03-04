@@ -17,9 +17,9 @@ use anapao::events::VecEventSink;
 use anapao::simulator::Simulator;
 use anapao::testkit::{deterministic_batch_config, deterministic_run_config, fixture_scenario};
 use anapao::types::{
-    ActionMode, BatchConfig, BatchReport, CaptureConfig, ConnectionKind, DelayNodeConfig,
-    EdgeConnectionConfig, EdgeId, EdgeSpec, EndConditionSpec, ExecutionMode, ManifestRef,
-    MetricKey, NodeConfig, NodeId, NodeKind, NodeModeConfig, NodeSpec, PoolNodeConfig,
+    ActionMode, BatchConfig, BatchReport, BatchRunTemplate, CaptureConfig, ConnectionKind,
+    DelayNodeConfig, EdgeConnectionConfig, EdgeId, EdgeSpec, EndConditionSpec, ExecutionMode,
+    ManifestRef, MetricKey, NodeConfig, NodeId, NodeKind, NodeModeConfig, NodeSpec, PoolNodeConfig,
     QueueNodeConfig, RunConfig, RunReport, ScenarioId, ScenarioSpec, SortingGateNodeConfig,
     StateConnectionConfig, StateConnectionRole, StateConnectionTarget, TransferSpec, TriggerMode,
     VariableRuntimeConfig, VariableSourceSpec, VariableUpdateTiming,
@@ -378,20 +378,22 @@ fn benches_simulation_guardrails(c: &mut Criterion) {
     let compile_fixture = fixture_scenario();
     group.throughput(Throughput::Elements(compile_fixture.nodes.len() as u64));
     group.bench_function("compile_scenario", move |b| {
-        b.iter(|| {
-            let compiled =
-                Simulator::compile(black_box(compile_fixture.clone())).expect("compile scenario");
-            black_box(checksum_compiled(&compiled))
-        })
+        b.iter_batched(
+            || compile_fixture.clone(),
+            |scenario| {
+                let compiled = Simulator::compile(black_box(scenario)).expect("compile scenario");
+                black_box(checksum_compiled(&compiled))
+            },
+            BatchSize::SmallInput,
+        )
     });
 
     let compiled_single = Simulator::compile(fixture_scenario()).expect("compile scenario fixture");
     let run_config = deterministic_run_config();
     group.bench_function("single_run", move |b| {
         b.iter(|| {
-            let report =
-                Simulator::run(black_box(&compiled_single), black_box(run_config.clone()), None)
-                    .expect("single run");
+            let report = Simulator::run(black_box(&compiled_single), black_box(&run_config))
+                .expect("single run");
             black_box(checksum_run_report(&report))
         })
     });
@@ -404,8 +406,7 @@ fn benches_simulation_guardrails(c: &mut Criterion) {
         b.iter(|| {
             let report = Simulator::run(
                 black_box(&expanded_compiled_single),
-                black_box(expanded_run_config.clone()),
-                None,
+                black_box(&expanded_run_config),
             )
             .expect("single run expanded semantics");
             black_box(checksum_run_report(&report))
@@ -417,12 +418,8 @@ fn benches_simulation_guardrails(c: &mut Criterion) {
     group.throughput(Throughput::Elements(batch_config.runs));
     group.bench_function("batch_run_sequential", move |b| {
         b.iter(|| {
-            let report = Simulator::run_batch(
-                black_box(&compiled_batch),
-                black_box(batch_config.clone()),
-                None,
-            )
-            .expect("batch run");
+            let report = Simulator::run_batch(black_box(&compiled_batch), black_box(&batch_config))
+                .expect("batch run");
             black_box(checksum_batch_report(&report))
         })
     });
@@ -433,15 +430,14 @@ fn benches_simulation_guardrails(c: &mut Criterion) {
         runs: 96,
         base_seed: 0xD1FF_EE11_u64,
         execution_mode: ExecutionMode::SingleThread,
-        run: RunConfig { seed: 123_456, max_steps: 64, capture: CaptureConfig::default() },
+        run_template: BatchRunTemplate { max_steps: 64, capture: CaptureConfig::default() },
     };
     group.throughput(Throughput::Elements(expanded_batch_config.runs));
     group.bench_function("batch_run_expanded_semantics", move |b| {
         b.iter(|| {
             let report = Simulator::run_batch(
                 black_box(&expanded_compiled_batch),
-                black_box(expanded_batch_config.clone()),
-                None,
+                black_box(&expanded_batch_config),
             )
             .expect("batch run expanded semantics");
             black_box(checksum_batch_report(&report))
@@ -456,15 +452,14 @@ fn benches_simulation_guardrails(c: &mut Criterion) {
             runs: 96,
             base_seed: 0xD1FF_EE11_u64,
             execution_mode: ExecutionMode::Rayon,
-            run: RunConfig { seed: 123_456, max_steps: 64, capture: CaptureConfig::default() },
+            run_template: BatchRunTemplate { max_steps: 64, capture: CaptureConfig::default() },
         };
         group.throughput(Throughput::Elements(expanded_batch_config_rayon.runs));
         group.bench_function("batch_run_expanded_semantics_rayon", move |b| {
             b.iter(|| {
                 let report = Simulator::run_batch(
                     black_box(&expanded_compiled_batch_rayon),
-                    black_box(expanded_batch_config_rayon.clone()),
-                    None,
+                    black_box(&expanded_batch_config_rayon),
                 )
                 .expect("batch run expanded semantics rayon");
                 black_box(checksum_batch_report(&report))
@@ -475,8 +470,9 @@ fn benches_simulation_guardrails(c: &mut Criterion) {
     let compiled_artifact =
         Simulator::compile(fixture_scenario()).expect("compile scenario fixture");
     let mut sink = VecEventSink::new();
+    let artifact_run_config = deterministic_run_config();
     let artifact_run_report =
-        Simulator::run(&compiled_artifact, deterministic_run_config(), Some(&mut sink))
+        Simulator::run_with_sink(&compiled_artifact, &artifact_run_config, &mut sink)
             .expect("seed run");
     let artifact_events = sink.into_events();
 
@@ -507,11 +503,14 @@ fn benches_simulation_hotspots(c: &mut Criterion) {
         (compile_stress.nodes.len() + compile_stress.edges.len()) as u64,
     ));
     group.bench_function("compile_large_topology", move |b| {
-        b.iter(|| {
-            let compiled =
-                Simulator::compile(black_box(compile_stress.clone())).expect("compile scenario");
-            black_box(checksum_compiled(&compiled))
-        })
+        b.iter_batched(
+            || compile_stress.clone(),
+            |scenario| {
+                let compiled = Simulator::compile(black_box(scenario)).expect("compile scenario");
+                black_box(checksum_compiled(&compiled))
+            },
+            BatchSize::SmallInput,
+        )
     });
 
     let expression_compiled =
@@ -521,12 +520,9 @@ fn benches_simulation_hotspots(c: &mut Criterion) {
     group.throughput(Throughput::Elements(expression_run_config.max_steps));
     group.bench_function("single_run_expression_fanout", move |b| {
         b.iter(|| {
-            let report = Simulator::run(
-                black_box(&expression_compiled),
-                black_box(expression_run_config.clone()),
-                None,
-            )
-            .expect("run expression fanout");
+            let report =
+                Simulator::run(black_box(&expression_compiled), black_box(&expression_run_config))
+                    .expect("run expression fanout");
             black_box(checksum_run_report(&report))
         })
     });
@@ -538,10 +534,10 @@ fn benches_simulation_hotspots(c: &mut Criterion) {
     group.bench_function("single_run_expression_fanout_with_events", move |b| {
         b.iter(|| {
             let mut sink = VecEventSink::new();
-            let report = Simulator::run(
+            let report = Simulator::run_with_sink(
                 black_box(&expression_events_compiled),
-                black_box(expression_events_run_config.clone()),
-                Some(&mut sink),
+                black_box(&expression_events_run_config),
+                &mut sink,
             )
             .expect("run expression fanout with events");
             let event_count = sink.into_events().len() as u64;
@@ -556,9 +552,8 @@ fn benches_simulation_hotspots(c: &mut Criterion) {
     group.throughput(Throughput::Elements(gate_run_config.max_steps));
     group.bench_function("single_run_sorting_gate_routing", move |b| {
         b.iter(|| {
-            let report =
-                Simulator::run(black_box(&gate_compiled), black_box(gate_run_config.clone()), None)
-                    .expect("run sorting gate routing");
+            let report = Simulator::run(black_box(&gate_compiled), black_box(&gate_run_config))
+                .expect("run sorting gate routing");
             black_box(checksum_run_report(&report))
         })
     });
@@ -570,12 +565,8 @@ fn benches_simulation_hotspots(c: &mut Criterion) {
     group.throughput(Throughput::Elements(state_run_config.max_steps));
     group.bench_function("single_run_state_modifiers", move |b| {
         b.iter(|| {
-            let report = Simulator::run(
-                black_box(&state_compiled),
-                black_box(state_run_config.clone()),
-                None,
-            )
-            .expect("run state modifiers");
+            let report = Simulator::run(black_box(&state_compiled), black_box(&state_run_config))
+                .expect("run state modifiers");
             black_box(checksum_run_report(&report))
         })
     });
@@ -586,15 +577,14 @@ fn benches_simulation_hotspots(c: &mut Criterion) {
         runs: 24,
         base_seed: 0xA0A0_4242_u64,
         execution_mode: ExecutionMode::SingleThread,
-        run: RunConfig { seed: 0xC0DE_4510_u64, max_steps: 48, capture: CaptureConfig::disabled() },
+        run_template: BatchRunTemplate { max_steps: 48, capture: CaptureConfig::disabled() },
     };
     group.throughput(Throughput::Elements(batch_expression_config.runs));
     group.bench_function("batch_run_expression_fanout", move |b| {
         b.iter(|| {
             let report = Simulator::run_batch(
                 black_box(&batch_expression_compiled),
-                black_box(batch_expression_config.clone()),
-                None,
+                black_box(&batch_expression_config),
             )
             .expect("batch expression fanout");
             black_box(checksum_batch_report(&report))
@@ -609,19 +599,14 @@ fn benches_simulation_hotspots(c: &mut Criterion) {
             runs: 24,
             base_seed: 0xA0A0_4242_u64,
             execution_mode: ExecutionMode::Rayon,
-            run: RunConfig {
-                seed: 0xC0DE_4510_u64,
-                max_steps: 48,
-                capture: CaptureConfig::disabled(),
-            },
+            run_template: BatchRunTemplate { max_steps: 48, capture: CaptureConfig::disabled() },
         };
         group.throughput(Throughput::Elements(batch_expression_config_rayon.runs));
         group.bench_function("batch_run_expression_fanout_rayon", move |b| {
             b.iter(|| {
                 let report = Simulator::run_batch(
                     black_box(&batch_expression_compiled_rayon),
-                    black_box(batch_expression_config_rayon.clone()),
-                    None,
+                    black_box(&batch_expression_config_rayon),
                 )
                 .expect("batch expression fanout rayon");
                 black_box(checksum_batch_report(&report))
@@ -632,10 +617,10 @@ fn benches_simulation_hotspots(c: &mut Criterion) {
     let artifact_compiled =
         Simulator::compile(expression_fanout_scenario()).expect("compile expression scenario");
     let mut sink = VecEventSink::new();
-    let artifact_run_report = Simulator::run(
+    let artifact_run_report = Simulator::run_with_sink(
         &artifact_compiled,
-        RunConfig { seed: 0xA77E_9001_u64, max_steps: 96, capture: CaptureConfig::default() },
-        Some(&mut sink),
+        &RunConfig { seed: 0xA77E_9001_u64, max_steps: 96, capture: CaptureConfig::default() },
+        &mut sink,
     )
     .expect("seed artifact run");
     let artifact_events = sink.into_events();

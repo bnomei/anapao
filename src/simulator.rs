@@ -20,18 +20,34 @@ impl Simulator {
         validation::compile_scenario(&spec)
     }
 
-    /// Execute a single deterministic run and optionally stream synthetic run events to a sink.
-    #[allow(clippy::needless_option_as_deref)]
+    /// Execute a single deterministic run.
     pub fn run(
         compiled: &CompiledScenario,
-        config: RunConfig,
+        config: &RunConfig,
+    ) -> Result<crate::types::RunReport, RunError> {
+        Self::run_internal(compiled, config, None)
+    }
+
+    /// Execute a single deterministic run and stream synthetic run events to a sink.
+    pub fn run_with_sink(
+        compiled: &CompiledScenario,
+        config: &RunConfig,
+        sink: &mut dyn EventSink,
+    ) -> Result<crate::types::RunReport, RunError> {
+        Self::run_internal(compiled, config, Some(sink))
+    }
+
+    #[allow(clippy::needless_option_as_deref)]
+    fn run_internal(
+        compiled: &CompiledScenario,
+        config: &RunConfig,
         mut sink: Option<&mut dyn EventSink>,
     ) -> Result<crate::types::RunReport, RunError> {
-        validation::validate_run_config(&config).map_err(map_setup_to_run)?;
+        validation::validate_run_config(config).map_err(map_setup_to_run)?;
         let report = if let Some(active_sink) = sink.as_deref_mut() {
-            engine::run_single_streaming(compiled, &config, "run-0", active_sink)?
+            engine::run_single_streaming(compiled, config, "run-0", active_sink)?
         } else {
-            engine::run_single(compiled, &config)?
+            engine::run_single(compiled, config)?
         };
 
         if let Some(active_sink) = sink.as_deref_mut() {
@@ -41,19 +57,37 @@ impl Simulator {
         Ok(report)
     }
 
-    /// Execute a single deterministic run, evaluate run expectations, and optionally stream run + assertion checkpoint events.
-    #[allow(clippy::needless_option_as_deref)]
+    /// Execute a single deterministic run and evaluate run expectations.
     pub fn run_with_assertions(
         compiled: &CompiledScenario,
-        config: RunConfig,
+        config: &RunConfig,
+        expectations: &[Expectation],
+    ) -> Result<(crate::types::RunReport, AssertionReport), SimError> {
+        Self::run_with_assertions_internal(compiled, config, expectations, None)
+    }
+
+    /// Execute a single deterministic run, evaluate expectations, and stream run + assertion events.
+    pub fn run_with_assertions_and_sink(
+        compiled: &CompiledScenario,
+        config: &RunConfig,
+        expectations: &[Expectation],
+        sink: &mut dyn EventSink,
+    ) -> Result<(crate::types::RunReport, AssertionReport), SimError> {
+        Self::run_with_assertions_internal(compiled, config, expectations, Some(sink))
+    }
+
+    #[allow(clippy::needless_option_as_deref)]
+    fn run_with_assertions_internal(
+        compiled: &CompiledScenario,
+        config: &RunConfig,
         expectations: &[Expectation],
         mut sink: Option<&mut dyn EventSink>,
     ) -> Result<(crate::types::RunReport, AssertionReport), SimError> {
-        validation::validate_run_config(&config)?;
+        validation::validate_run_config(config)?;
         let report = if let Some(active_sink) = sink.as_deref_mut() {
-            engine::run_single_streaming_for_assertions(compiled, &config, "run-0", active_sink)?
+            engine::run_single_streaming_for_assertions(compiled, config, "run-0", active_sink)?
         } else {
-            engine::run_single(compiled, &config)?
+            engine::run_single(compiled, config)?
         };
         let assertion_report = assertions::evaluate_run_expectations(&report, expectations)?;
 
@@ -79,14 +113,30 @@ impl Simulator {
         Ok((report, assertion_report))
     }
 
-    /// Execute deterministic batch runs and optionally stream summary events to a sink.
+    /// Execute deterministic batch runs.
     pub fn run_batch(
         compiled: &CompiledScenario,
-        config: BatchConfig,
+        config: &BatchConfig,
+    ) -> Result<crate::types::BatchReport, RunError> {
+        Self::run_batch_internal(compiled, config, None)
+    }
+
+    /// Execute deterministic batch runs and stream summary events to a sink.
+    pub fn run_batch_with_sink(
+        compiled: &CompiledScenario,
+        config: &BatchConfig,
+        sink: &mut dyn EventSink,
+    ) -> Result<crate::types::BatchReport, RunError> {
+        Self::run_batch_internal(compiled, config, Some(sink))
+    }
+
+    fn run_batch_internal(
+        compiled: &CompiledScenario,
+        config: &BatchConfig,
         sink: Option<&mut dyn EventSink>,
     ) -> Result<crate::types::BatchReport, RunError> {
-        validation::validate_batch_config(&config).map_err(map_setup_to_run)?;
-        let report = batch::run_batch(compiled, &config)?;
+        validation::validate_batch_config(config).map_err(map_setup_to_run)?;
+        let report = batch::run_batch(compiled, config)?;
 
         if let Some(sink) = sink {
             emit_batch_events(sink, &report)?;
@@ -96,15 +146,33 @@ impl Simulator {
         Ok(report)
     }
 
-    /// Execute deterministic batch runs, evaluate batch expectations, and optionally stream summary + assertion checkpoint events.
+    /// Execute deterministic batch runs and evaluate batch expectations.
     pub fn run_batch_with_assertions(
         compiled: &CompiledScenario,
-        config: BatchConfig,
+        config: &BatchConfig,
+        expectations: &[Expectation],
+    ) -> Result<(crate::types::BatchReport, AssertionReport), SimError> {
+        Self::run_batch_with_assertions_internal(compiled, config, expectations, None)
+    }
+
+    /// Execute deterministic batch runs, evaluate expectations, and stream summary + assertions.
+    pub fn run_batch_with_assertions_and_sink(
+        compiled: &CompiledScenario,
+        config: &BatchConfig,
+        expectations: &[Expectation],
+        sink: &mut dyn EventSink,
+    ) -> Result<(crate::types::BatchReport, AssertionReport), SimError> {
+        Self::run_batch_with_assertions_internal(compiled, config, expectations, Some(sink))
+    }
+
+    fn run_batch_with_assertions_internal(
+        compiled: &CompiledScenario,
+        config: &BatchConfig,
         expectations: &[Expectation],
         sink: Option<&mut dyn EventSink>,
     ) -> Result<(crate::types::BatchReport, AssertionReport), SimError> {
-        validation::validate_batch_config(&config)?;
-        let report = batch::run_batch(compiled, &config)?;
+        validation::validate_batch_config(config)?;
+        let report = batch::run_batch(compiled, config)?;
         let assertion_report = assertions::evaluate_batch_expectations(&report, expectations)?;
 
         if let Some(sink) = sink {
@@ -206,7 +274,8 @@ mod tests {
     };
     use crate::types::MetricKey;
     use crate::types::{
-        BatchConfig, CaptureConfig, EndConditionSpec, ExecutionMode, NodeId, RunConfig,
+        BatchConfig, BatchRunTemplate, CaptureConfig, EndConditionSpec, ExecutionMode, NodeId,
+        RunConfig,
     };
     use crate::validation::compile_scenario;
 
@@ -217,15 +286,19 @@ mod tests {
         let compiled = fixture_compiled_scenario().expect("compiled fixture");
         let mut sink = VecEventSink::new();
 
-        let run_report = Simulator::run(&compiled, deterministic_run_config(), Some(&mut sink))
-            .expect("single run should succeed");
+        let run_report =
+            Simulator::run_with_sink(&compiled, &deterministic_run_config(), &mut sink)
+                .expect("single run should succeed");
         assert!(run_report.completed);
         assert!(!sink.events().is_empty());
 
         let mut batch_sink = VecEventSink::new();
-        let batch_report =
-            Simulator::run_batch(&compiled, deterministic_batch_config(), Some(&mut batch_sink))
-                .expect("batch run should succeed");
+        let batch_report = Simulator::run_batch_with_sink(
+            &compiled,
+            &deterministic_batch_config(),
+            &mut batch_sink,
+        )
+        .expect("batch run should succeed");
         assert_eq!(batch_report.completed_runs, batch_report.requested_runs);
         assert!(!batch_sink.events().is_empty());
     }
@@ -240,11 +313,11 @@ mod tests {
             expected: 3.0,
         }];
 
-        let (_report, assertion_report) = Simulator::run_with_assertions(
+        let (_report, assertion_report) = Simulator::run_with_assertions_and_sink(
             &compiled,
-            deterministic_run_config(),
+            &deterministic_run_config(),
             &expectations,
-            Some(&mut sink),
+            &mut sink,
         )
         .expect("run with assertions should succeed");
         assert_eq!(assertion_report.total, 1);
@@ -259,7 +332,7 @@ mod tests {
     fn simulator_run_streams_events_in_monotonic_step_lifecycle_order() {
         let compiled = fixture_compiled_scenario().expect("compiled fixture");
         let mut sink = VecEventSink::new();
-        let report = Simulator::run(&compiled, deterministic_run_config(), Some(&mut sink))
+        let report = Simulator::run_with_sink(&compiled, &deterministic_run_config(), &mut sink)
             .expect("run should succeed");
         let events = sink.events();
 
@@ -316,7 +389,7 @@ mod tests {
     fn simulator_run_step_zero_completion_emits_terminal_step_end() {
         let compiled = immediate_completion_compiled_scenario();
         let mut sink = VecEventSink::new();
-        let report = Simulator::run(&compiled, deterministic_run_config(), Some(&mut sink))
+        let report = Simulator::run_with_sink(&compiled, &deterministic_run_config(), &mut sink)
             .expect("step-zero complete run should succeed");
         let events = sink.events();
 
@@ -349,11 +422,11 @@ mod tests {
             expected: 0.0,
         }];
         let mut sink = VecEventSink::new();
-        let (report, assertion_report) = Simulator::run_with_assertions(
+        let (report, assertion_report) = Simulator::run_with_assertions_and_sink(
             &compiled,
-            deterministic_run_config(),
+            &deterministic_run_config(),
             &expectations,
-            Some(&mut sink),
+            &mut sink,
         )
         .expect("step-zero run_with_assertions should succeed");
         let events = sink.events();
@@ -388,11 +461,11 @@ mod tests {
             max: 3.0,
         }];
 
-        let (_report, assertion_report) = Simulator::run_batch_with_assertions(
+        let (_report, assertion_report) = Simulator::run_batch_with_assertions_and_sink(
             &compiled,
-            deterministic_batch_config(),
+            &deterministic_batch_config(),
             &expectations,
-            Some(&mut sink),
+            &mut sink,
         )
         .expect("batch with assertions should succeed");
         assert_eq!(assertion_report.total, 1);
@@ -407,7 +480,7 @@ mod tests {
         let compiled = fixture_compiled_scenario().expect("compiled fixture");
         let invalid_run = RunConfig { seed: 1, max_steps: 0, capture: CaptureConfig::default() };
 
-        let run_error = Simulator::run(&compiled, invalid_run, None).expect_err("must fail");
+        let run_error = Simulator::run(&compiled, &invalid_run).expect_err("must fail");
         assert!(matches!(
             run_error,
             RunError::InvalidRunConfig { name, reason }
@@ -418,14 +491,13 @@ mod tests {
             runs: 2,
             base_seed: 1,
             execution_mode: ExecutionMode::SingleThread,
-            run: RunConfig { seed: 1, max_steps: 0, capture: CaptureConfig::default() },
+            run_template: BatchRunTemplate { max_steps: 0, capture: CaptureConfig::default() },
         };
-        let batch_error =
-            Simulator::run_batch(&compiled, invalid_batch, None).expect_err("must fail");
+        let batch_error = Simulator::run_batch(&compiled, &invalid_batch).expect_err("must fail");
         assert!(matches!(
             batch_error,
             RunError::InvalidRunConfig { name, reason }
-                if name == "batch.run.max_steps" && reason == "must be greater than 0"
+                if name == "batch.run_template.max_steps" && reason == "must be greater than 0"
         ));
     }
 
@@ -433,26 +505,35 @@ mod tests {
     fn simulator_sink_errors_are_mapped_for_push_and_flush() {
         let compiled = fixture_compiled_scenario().expect("compiled fixture");
         let mut push_failing_sink = FailingSink { fail_on_push: true, fail_on_flush: false };
-        let push_error =
-            Simulator::run(&compiled, deterministic_run_config(), Some(&mut push_failing_sink))
-                .expect_err("push failure should surface");
+        let push_error = Simulator::run_with_sink(
+            &compiled,
+            &deterministic_run_config(),
+            &mut push_failing_sink,
+        )
+        .expect_err("push failure should surface");
         assert!(
             matches!(push_error, RunError::EventSink { message } if message.contains("push failed"))
         );
 
         let mut flush_failing_sink = FailingSink { fail_on_push: false, fail_on_flush: true };
-        let flush_error =
-            Simulator::run(&compiled, deterministic_run_config(), Some(&mut flush_failing_sink))
-                .expect_err("flush failure should surface");
+        let flush_error = Simulator::run_with_sink(
+            &compiled,
+            &deterministic_run_config(),
+            &mut flush_failing_sink,
+        )
+        .expect_err("flush failure should surface");
         assert!(
             matches!(flush_error, RunError::EventSink { message } if message.contains("flush failed"))
         );
 
         let mut fail_after_two_pushes =
             FailAfterNSink { fail_after_pushes: 1, pushes: 0, flushes: 0 };
-        let streaming_error =
-            Simulator::run(&compiled, deterministic_run_config(), Some(&mut fail_after_two_pushes))
-                .expect_err("streaming push failure should surface");
+        let streaming_error = Simulator::run_with_sink(
+            &compiled,
+            &deterministic_run_config(),
+            &mut fail_after_two_pushes,
+        )
+        .expect_err("streaming push failure should surface");
         assert!(
             matches!(streaming_error, RunError::EventSink { message } if message.contains("forced push failure"))
         );
@@ -472,11 +553,11 @@ mod tests {
             expected: 3.0,
         }];
         let mut sink = FailOnEventNameSink::new("assertion_checkpoint");
-        let error = Simulator::run_with_assertions(
+        let error = Simulator::run_with_assertions_and_sink(
             &compiled,
-            deterministic_run_config(),
+            &deterministic_run_config(),
             &expectations,
-            Some(&mut sink),
+            &mut sink,
         )
         .expect_err("assertion checkpoint push failure should surface");
         assert!(matches!(
@@ -496,11 +577,11 @@ mod tests {
             expected: 3.0,
         }];
         let mut sink = FailingSink { fail_on_push: false, fail_on_flush: true };
-        let error = Simulator::run_with_assertions(
+        let error = Simulator::run_with_assertions_and_sink(
             &compiled,
-            deterministic_run_config(),
+            &deterministic_run_config(),
             &expectations,
-            Some(&mut sink),
+            &mut sink,
         )
         .expect_err("flush failure should surface");
         assert!(
@@ -538,9 +619,8 @@ mod tests {
 
         let sim_error = Simulator::run_with_assertions(
             &fixture_compiled_scenario().expect("compiled fixture"),
-            RunConfig { seed: 1, max_steps: 0, capture: CaptureConfig::default() },
+            &RunConfig { seed: 1, max_steps: 0, capture: CaptureConfig::default() },
             &[],
-            None,
         )
         .expect_err("invalid config should map to sim error");
         assert!(matches!(

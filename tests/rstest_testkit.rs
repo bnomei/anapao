@@ -94,7 +94,10 @@ fn reports_satisfy_basic_run_and_batch_invariants(
     let actual_indices = batch_report.runs.iter().map(|run| run.run_index).collect::<Vec<_>>();
 
     assert_eq!(actual_indices, expected_indices);
-    assert!(batch_report.runs.iter().all(|run| run.steps_executed <= batch_config.run.max_steps));
+    assert!(batch_report
+        .runs
+        .iter()
+        .all(|run| run.steps_executed <= batch_config.run_template.max_steps));
     assert!(batch_report
         .runs
         .iter()

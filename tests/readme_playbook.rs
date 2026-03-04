@@ -17,13 +17,9 @@ fn readme_playbook_end_to_end_artifacts_and_assertions() {
     }];
 
     let mut sink = VecEventSink::new();
-    let (run_report, assertion_report) = Simulator::run_with_assertions(
-        &compiled,
-        run_config.clone(),
-        &expectations,
-        Some(&mut sink),
-    )
-    .expect("run with assertions");
+    let (run_report, assertion_report) =
+        Simulator::run_with_assertions_and_sink(&compiled, &run_config, &expectations, &mut sink)
+            .expect("run with assertions");
 
     assert!(run_report.completed);
     assert_eq!(run_report.steps_executed, 3);
@@ -31,8 +27,7 @@ fn readme_playbook_end_to_end_artifacts_and_assertions() {
     assert!(assertion_report.is_success());
     assert!(sink.events().iter().any(|event| event.event_name() == "assertion_checkpoint"));
 
-    let rerun =
-        Simulator::run(&compiled, run_config, None).expect("rerun with same deterministic seed");
+    let rerun = Simulator::run(&compiled, &run_config).expect("rerun with same deterministic seed");
     assert_eq!(rerun.steps_executed, run_report.steps_executed);
     assert_eq!(rerun.final_metrics, run_report.final_metrics);
 

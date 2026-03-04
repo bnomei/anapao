@@ -1,5 +1,8 @@
 # anapao
 
+[![Discord](https://flat.badgen.net/badge/discord/bnomei?color=7289da&icon=discord&label)](https://discordapp.com/users/bnomei)
+[![Buymecoffee](https://flat.badgen.net/badge/icon/donate?icon=buymeacoffee&color=FF813F&label)](https://www.buymeacoffee.com/bnomei)
+
 `anapao` is a deterministic Rust testing utility for simulation and stochastic workflows.  
 This README is a linear tutorial for new users: you will build one scenario, run it deterministically, add expectations, run Monte Carlo batches, and persist CI-friendly artifacts.
 
@@ -36,8 +39,8 @@ anapao = "0.1.1"
 ```rust
 use anapao::types::{EndConditionSpec, MetricKey, ScenarioSpec, TransferSpec};
 
-let mut scenario = ScenarioSpec::source_sink(TransferSpec::Fixed { amount: 1.0 });
-scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 3 }];
+let mut scenario = ScenarioSpec::source_sink(TransferSpec::Fixed { amount: 1.0 })
+    .with_end_condition(EndConditionSpec::MaxSteps { steps: 3 });
 scenario.tracked_metrics.insert(MetricKey::fixture("sink"));
 
 assert_eq!(scenario.nodes.len(), 2);
@@ -60,8 +63,8 @@ Compilation validates and transforms your scenario into deterministic execution 
 use anapao::types::{EndConditionSpec, ScenarioSpec, TransferSpec};
 use anapao::Simulator;
 
-let mut scenario = ScenarioSpec::source_sink(TransferSpec::Fixed { amount: 1.0 });
-scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 3 }];
+let scenario = ScenarioSpec::source_sink(TransferSpec::Fixed { amount: 1.0 })
+    .with_end_condition(EndConditionSpec::MaxSteps { steps: 3 });
 
 let compiled = Simulator::compile(scenario).unwrap();
 assert_eq!(compiled.scenario.id.as_str(), "scenario-source-sink");
@@ -111,7 +114,7 @@ use anapao::{testkit, Simulator};
 use anapao::types::MetricKey;
 
 let compiled = Simulator::compile(testkit::fixture_scenario()).unwrap();
-let report = Simulator::run(&compiled, testkit::deterministic_run_config(), None).unwrap();
+let report = Simulator::run(&compiled, &testkit::deterministic_run_config()).unwrap();
 
 assert!(report.completed);
 assert_eq!(report.steps_executed, 3);
@@ -168,7 +171,7 @@ What you learned:
 
 Use the integrated assertion path and capture ordered events for diagnostics.
 
-### Snippet S06 — `run_with_assertions` + `VecEventSink`
+### Snippet S06 — `run_with_assertions_and_sink` + `VecEventSink`
 
 ```rust
 use anapao::assertions::{Expectation, MetricSelector};
@@ -184,11 +187,11 @@ let expectations = vec![Expectation::Equals {
 }];
 
 let mut sink = VecEventSink::new();
-let (_report, assertion_report) = Simulator::run_with_assertions(
+let (_report, assertion_report) = Simulator::run_with_assertions_and_sink(
     &compiled,
-    testkit::deterministic_run_config(),
+    &testkit::deterministic_run_config(),
     &expectations,
-    Some(&mut sink),
+    &mut sink,
 )
 .unwrap();
 
@@ -212,16 +215,17 @@ What you learned:
 ### Snippet S07 — Create BatchConfig
 
 ```rust
-use anapao::types::{BatchConfig, ExecutionMode, RunConfig};
+use anapao::types::{BatchConfig, BatchRunTemplate, ExecutionMode};
 
-let mut batch = BatchConfig::for_runs(64)
+let batch = BatchConfig::for_runs(64)
     .with_execution_mode(ExecutionMode::SingleThread)
-    .with_run(RunConfig::for_seed(999))
+    .with_base_seed(7)
+    .with_run_template(BatchRunTemplate::default())
     .with_max_steps(50);
-batch.base_seed = 7;
 
 assert_eq!(batch.runs, 64);
 assert_eq!(batch.base_seed, 7);
+assert_eq!(batch.run_template.max_steps, 50);
 ```
 
 What you learned:
@@ -241,7 +245,7 @@ use anapao::{testkit, Simulator};
 use anapao::types::MetricKey;
 
 let compiled = Simulator::compile(testkit::fixture_scenario()).unwrap();
-let batch = Simulator::run_batch(&compiled, testkit::deterministic_batch_config(), None).unwrap();
+let batch = Simulator::run_batch(&compiled, &testkit::deterministic_batch_config()).unwrap();
 
 assert_eq!(batch.completed_runs, batch.requested_runs);
 assert!(batch.runs.windows(2).all(|window| window[0].run_index < window[1].run_index));
@@ -250,6 +254,7 @@ assert!(batch.aggregate_series.contains_key(&MetricKey::fixture("sink")));
 
 What you learned:
 - batch summaries are deterministic and index-ordered.
+- `completed_runs` counts reported run summaries; inspect each `run.completed` for semantic completion.
 
 ---
 
@@ -274,11 +279,11 @@ let expectations = vec![Expectation::Equals {
 }];
 
 let mut sink = VecEventSink::new();
-let (run_report, assertion_report) = Simulator::run_with_assertions(
+let (run_report, assertion_report) = Simulator::run_with_assertions_and_sink(
     &compiled,
-    testkit::deterministic_run_config(),
+    &testkit::deterministic_run_config(),
     &expectations,
-    Some(&mut sink),
+    &mut sink,
 )
 .unwrap();
 assert!(run_report.completed);
@@ -316,7 +321,7 @@ use anapao::types::MetricKey;
 
 fn deterministic_fixture_smoke() {
     let compiled = Simulator::compile(testkit::fixture_scenario()).unwrap();
-    let report = Simulator::run(&compiled, testkit::deterministic_run_config(), None).unwrap();
+    let report = Simulator::run(&compiled, &testkit::deterministic_run_config()).unwrap();
     assert_eq!(report.final_metrics.get(&MetricKey::fixture("sink")), Some(&3.0));
 }
 
@@ -339,7 +344,7 @@ What you learned:
   - fix: verify `end_conditions` are configured and reachable.
 - Seed confusion:
   - symptom: output differs between runs.
-  - fix: pin `RunConfig.seed` and keep batch `base_seed` stable.
+  - fix: pin `RunConfig.seed` for single runs and keep batch `base_seed` stable (batch seeds derive from `base_seed` + run index).
 - Sparse traces:
   - symptom: insufficient snapshots for diagnostics.
   - fix: adjust `RunConfig.capture` (`every_n_steps`, step-zero/final flags).

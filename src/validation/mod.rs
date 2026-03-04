@@ -2,9 +2,10 @@ use std::collections::BTreeMap;
 
 use crate::error::SetupError;
 use crate::types::{
-    BatchConfig, ConnectionKind, DelayNodeConfig, EdgeId, EdgeSpec, EndConditionSpec, MetricKey,
-    NodeConfig, NodeId, NodeKind, NodeSpec, QueueNodeConfig, ResourceConnectionConfig, RunConfig,
-    ScenarioSpec, StateConnectionRole, StateConnectionTarget, TransferSpec,
+    BatchConfig, BatchRunTemplate, ConnectionKind, DelayNodeConfig, EdgeId, EdgeSpec,
+    EndConditionSpec, MetricKey, NodeConfig, NodeId, NodeKind, NodeSpec, QueueNodeConfig,
+    ResourceConnectionConfig, RunConfig, ScenarioSpec, StateConnectionRole, StateConnectionTarget,
+    TransferSpec,
 };
 
 /// Compiled scenario representation with deterministic node/edge iteration indexes.
@@ -15,6 +16,7 @@ pub struct CompiledScenario {
     pub edge_order: Vec<EdgeId>,
     pub node_index_by_id: BTreeMap<NodeId, usize>,
     pub edge_index_by_id: BTreeMap<EdgeId, usize>,
+    pub metric_index_by_name: BTreeMap<String, usize>,
 }
 
 /// Compiles a scenario into deterministic index structures and validates structural invariants.
@@ -66,6 +68,11 @@ pub fn compile_scenario(spec: &ScenarioSpec) -> Result<CompiledScenario, SetupEr
         .enumerate()
         .map(|(index, edge_id)| (edge_id.clone(), index))
         .collect::<BTreeMap<_, _>>();
+    let metric_index_by_name = node_order
+        .iter()
+        .enumerate()
+        .map(|(index, node_id)| (node_id.as_str().to_string(), index))
+        .collect::<BTreeMap<_, _>>();
 
     Ok(CompiledScenario {
         scenario: spec.clone(),
@@ -73,6 +80,7 @@ pub fn compile_scenario(spec: &ScenarioSpec) -> Result<CompiledScenario, SetupEr
         edge_order,
         node_index_by_id,
         edge_index_by_id,
+        metric_index_by_name,
     })
 }
 
@@ -90,7 +98,7 @@ pub fn validate_batch_config(config: &BatchConfig) -> Result<(), SetupError> {
         });
     }
 
-    validate_run_config_with_prefix(&config.run, "batch.run")
+    validate_batch_run_template_with_prefix(&config.run_template, "batch.run_template")
 }
 
 fn validate_run_config_with_prefix(config: &RunConfig, prefix: &str) -> Result<(), SetupError> {
@@ -102,6 +110,27 @@ fn validate_run_config_with_prefix(config: &RunConfig, prefix: &str) -> Result<(
     }
 
     if config.capture.every_n_steps == 0 {
+        return Err(SetupError::InvalidParameter {
+            name: format!("{prefix}.capture.every_n_steps"),
+            reason: "must be greater than 0".to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_batch_run_template_with_prefix(
+    template: &BatchRunTemplate,
+    prefix: &str,
+) -> Result<(), SetupError> {
+    if template.max_steps == 0 {
+        return Err(SetupError::InvalidParameter {
+            name: format!("{prefix}.max_steps"),
+            reason: "must be greater than 0".to_string(),
+        });
+    }
+
+    if template.capture.every_n_steps == 0 {
         return Err(SetupError::InvalidParameter {
             name: format!("{prefix}.capture.every_n_steps"),
             reason: "must be greater than 0".to_string(),
@@ -674,9 +703,9 @@ fn validate_queue_constraints(node_id: &NodeId, node: &NodeSpec) -> Result<(), S
 mod tests {
     use crate::error::SetupError;
     use crate::types::{
-        BatchConfig, CaptureConfig, ConnectionKind, DelayNodeConfig, EdgeConnectionConfig,
-        EdgeSpec, EndConditionSpec, ExecutionMode, MetricKey, NodeConfig, NodeKind, NodeSpec,
-        PoolNodeConfig, QueueNodeConfig, RunConfig, ScenarioId, ScenarioSpec,
+        BatchConfig, BatchRunTemplate, CaptureConfig, ConnectionKind, DelayNodeConfig,
+        EdgeConnectionConfig, EdgeSpec, EndConditionSpec, ExecutionMode, MetricKey, NodeConfig,
+        NodeKind, NodeSpec, PoolNodeConfig, QueueNodeConfig, RunConfig, ScenarioId, ScenarioSpec,
         StateConnectionConfig, StateConnectionRole, StateConnectionTarget, TransferSpec,
     };
 
@@ -1820,7 +1849,7 @@ mod tests {
             runs: 0,
             base_seed: 1,
             execution_mode: ExecutionMode::SingleThread,
-            run: RunConfig::default(),
+            run_template: BatchRunTemplate::default(),
         };
 
         let error = validate_batch_config(&config).expect_err("zero runs must fail");
@@ -1839,13 +1868,13 @@ mod tests {
             runs: 10,
             base_seed: 1,
             execution_mode: ExecutionMode::Rayon,
-            run: RunConfig { seed: 99, max_steps: 0, capture: CaptureConfig::default() },
+            run_template: BatchRunTemplate { max_steps: 0, capture: CaptureConfig::default() },
         };
 
         let error = validate_batch_config(&config).expect_err("invalid nested run must fail");
         match error {
             SetupError::InvalidParameter { name, reason } => {
-                assert_eq!(name, "batch.run.max_steps");
+                assert_eq!(name, "batch.run_template.max_steps");
                 assert_eq!(reason, "must be greater than 0");
             }
             other => panic!("expected InvalidParameter, got {other:?}"),
