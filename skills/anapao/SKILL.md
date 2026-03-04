@@ -17,7 +17,7 @@ Write deterministic, evidence-rich tests for `anapao` from public crate surfaces
 ## Core Workflow
 
 1. Classify test intent: compile validation, run behavior, batch behavior, assertions, event contract, artifact schema, or parity semantics.
-2. Prefer `anapao::testkit` fixtures first. Build custom `types::*` scenarios only when existing fixtures are insufficient.
+2. Prefer `anapao::testkit` fixtures first. For custom setup, prefer convenience constructors (`ScenarioSpec::source_sink`, `ScenarioSpec::linear_pipeline`) before manual graph wiring.
 3. Compile once with `Simulator::compile` and reuse `CompiledScenario`.
 4. Execute with the smallest matching API:
    - `Simulator::run`
@@ -45,6 +45,7 @@ Write deterministic, evidence-rich tests for `anapao` from public crate surfaces
 ## Test Authoring Rules
 
 - Pin `RunConfig.seed` and `BatchConfig.base_seed` for deterministic tests.
+- Prefer builder-first config setup (`RunConfig::for_seed(...).with_*`, `BatchConfig::for_runs(...).with_*`) for readability and parity with README snippets.
 - Prefer integration tests in `tests/*.rs`.
 - Reuse `anapao::testkit` fixtures before adding new setup helpers.
 - Validate event ordering whenever using `VecEventSink` or custom sinks.
@@ -58,7 +59,9 @@ Run these before handoff:
 
 ```bash
 cargo test --test <file>
+cargo test --test readme_snippets
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets
+cargo test --all-targets --features parallel
 ```

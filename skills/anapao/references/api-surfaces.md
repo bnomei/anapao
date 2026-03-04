@@ -16,12 +16,12 @@ Use this flow to pick APIs:
 
 | Surface | Use this when | Key entrypoints |
 | --- | --- | --- |
-| `types` | Defining scenarios/configs and inspecting reports | `ScenarioSpec`, `RunConfig`, `BatchConfig`, `RunReport`, `BatchReport`, `ManifestRef` |
+| `types` | Defining scenarios/configs and inspecting reports | `ScenarioSpec` (+ `source_sink`/`linear_pipeline`), `RunConfig`, `BatchConfig`, `ConfidenceLevel`, `RunReport`, `BatchReport`, `ManifestRef` |
 | `Simulator` | Running public end-to-end workflows | `compile`, `run`, `run_with_assertions`, `run_batch`, `run_batch_with_assertions` |
 | `assertions` | Expressing metric expectations declaratively | `Expectation`, `MetricSelector`, `evaluate_run_expectations`, `evaluate_batch_expectations` |
 | `events` | Capturing ordered run diagnostics | `RunEvent`, `RunEventPhase`, `VecEventSink`, `EventSink` |
-| `artifact` | Writing/reading CI-friendly outputs | `write_run_artifacts`, `write_run_artifacts_with_assertions`, `write_batch_artifacts`, `read_manifest_compat` |
-| `stats` | Computing prediction and confidence indicators | `prediction_indicators`, `prediction_indicators_by_metric`, `summarize_by_metric` |
+| `artifact` | Writing/reading CI-friendly outputs | `write_run_artifacts`, `write_run_artifacts_with_assertions`, `write_batch_artifacts`, `write_batch_artifacts_with_confidence_level`, `read_manifest_compat` |
+| `stats` | Computing prediction and confidence indicators | `prediction_indicators`, `prediction_indicators_with_confidence`, `prediction_indicators_by_metric`, `prediction_indicators_by_metric_with_confidence`, `summarize_by_metric` |
 | `testkit` | Reusing deterministic fixtures and parity helpers | `fixture_scenario`, `deterministic_run_config`, `deterministic_batch_config`, parity loaders |
 | `analysis` | Producing dataframe views (feature-gated) | `run_series_frame`, `batch_series_frame`, `batch_final_metrics_frame` |
 
@@ -74,6 +74,15 @@ let b = Simulator::run_batch(&compiled, config, None)?;
 assert_eq!(a, b);
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
+
+## Confidence Semantics Notes
+
+- Treat `confidence_lower_95`, `confidence_upper_95`, and `confidence_margin_95` as strict 95% fields.
+- For selected confidence levels (`P90`/`P95`/`P99`), use report metadata and selected fields:
+  - `selected_confidence_level`
+  - `confidence_lower_selected`
+  - `confidence_upper_selected`
+  - `confidence_margin_selected`
 
 ### Event stream capture
 

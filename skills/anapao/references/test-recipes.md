@@ -74,6 +74,32 @@ fn batch_replay_and_seed_schedule_are_stable() {
 }
 ```
 
+## Builder-First Scenario Constructors
+
+```rust
+use anapao::types::{EndConditionSpec, MetricKey, RunConfig, ScenarioSpec, TransferSpec};
+use anapao::Simulator;
+
+#[test]
+fn constructor_scenarios_compile_and_run() {
+    let mut source_sink = ScenarioSpec::source_sink(TransferSpec::Fixed { amount: 1.0 });
+    source_sink.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 3 }];
+    source_sink.tracked_metrics.insert(MetricKey::fixture("sink"));
+
+    let compiled_source_sink = Simulator::compile(source_sink).expect("compile source_sink");
+    let run_source_sink =
+        Simulator::run(&compiled_source_sink, RunConfig::for_seed(42), None).expect("run");
+    assert!(run_source_sink.completed);
+
+    let compiled_pipeline =
+        Simulator::compile(ScenarioSpec::linear_pipeline(4)).expect("compile pipeline");
+    let run_pipeline =
+        Simulator::run(&compiled_pipeline, RunConfig::for_seed(42), None).expect("run pipeline");
+    assert!(run_pipeline.completed);
+    assert!(run_pipeline.final_metrics.contains_key(&MetricKey::fixture("sink")));
+}
+```
+
 ## Compile-Time Invalid Reference Validation
 
 ```rust
@@ -119,5 +145,28 @@ fn artifact_schema_and_compat_reader_stay_stable() {
     }"#;
     let upgraded = read_manifest_compat_from_slice(raw_v1).expect("compat read");
     assert_eq!(upgraded.schema_version, ARTIFACT_SCHEMA_VERSION_V2);
+}
+```
+
+## README Snippet Drift Guard
+
+```rust
+use std::fs;
+
+#[test]
+fn readme_contains_builder_snippet_markers() {
+    let path = format!("{}/README.md", env!("CARGO_MANIFEST_DIR"));
+    let readme = fs::read_to_string(path).expect("read README");
+
+    for needle in [
+        "### Snippet S01 — Build a Minimal Scenario",
+        "ScenarioSpec::source_sink(TransferSpec::Fixed { amount: 1.0 })",
+        "### Snippet S03 — Create a Deterministic RunConfig",
+        "RunConfig::for_seed(42).with_max_steps(250).with_capture(",
+        "### Snippet S07 — Create BatchConfig",
+        "BatchConfig::for_runs(64)",
+    ] {
+        assert!(readme.contains(needle), "README drift: missing `{needle}`");
+    }
 }
 ```
