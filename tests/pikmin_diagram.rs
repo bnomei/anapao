@@ -282,6 +282,8 @@ fn pikmin_diagram_rejects_unresolved_tracked_metric_at_compile_time() {
     let mut scenario = pikmin_scenario(PikminFixtureTuning::new(3, 2, 70.0).expect("valid tuning"))
         .expect("pikmin scenario should build");
     scenario.tracked_metrics.insert(MetricKey::fixture("n99_missing_metric"));
+    let available_metric_keys =
+        scenario.nodes.keys().map(ToString::to_string).collect::<Vec<_>>().join(", ");
 
     let error = Simulator::compile(scenario).expect_err("compile should reject unresolved metric");
     match error {
@@ -289,7 +291,9 @@ fn pikmin_diagram_rejects_unresolved_tracked_metric_at_compile_time() {
             assert_eq!(graph, "scenario[scenario-pikmin-diagram].metrics");
             assert_eq!(
                 reference,
-                "tracked_metrics[n99_missing_metric] references unresolved metric `n99_missing_metric`"
+                format!(
+                    "tracked_metrics[n99_missing_metric] references unresolved metric `n99_missing_metric`; hint: choose one of the available metric keys: [{available_metric_keys}]"
+                )
             );
         }
         other => panic!("expected InvalidGraphReference, got {other:?}"),

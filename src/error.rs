@@ -126,6 +126,20 @@ mod tests {
     }
 
     #[test]
+    fn setup_error_display_text_with_hint() {
+        let err = SetupError::InvalidGraphReference {
+            graph: "scenario[s].nodes".to_string(),
+            reference: "edges.e1.from references missing nodes.missing; hint: choose one of the available node IDs: [source, sink]"
+                .to_string(),
+        };
+
+        assert_eq!(
+            err.to_string(),
+            "invalid graph reference `edges.e1.from references missing nodes.missing; hint: choose one of the available node IDs: [source, sink]` in graph `scenario[s].nodes`"
+        );
+    }
+
+    #[test]
     fn run_error_display_text() {
         let err = RunError::StepOverflow { attempted: 101, max: 100 };
 
