@@ -34,22 +34,9 @@ anapao = "0.1.1"
 ### Snippet S01 — Build a Minimal Scenario
 
 ```rust
-use anapao::types::{
-    EdgeId, EdgeSpec, EndConditionSpec, MetricKey, NodeId, NodeKind, NodeSpec, ScenarioId,
-    ScenarioSpec, TransferSpec,
-};
+use anapao::types::{EndConditionSpec, MetricKey, ScenarioSpec, TransferSpec};
 
-let source = NodeId::fixture("source");
-let sink = NodeId::fixture("sink");
-let mut scenario = ScenarioSpec::new(ScenarioId::fixture("scenario-readme"))
-    .with_node(NodeSpec::new(source.clone(), NodeKind::Source).with_initial_value(1.0))
-    .with_node(NodeSpec::new(sink.clone(), NodeKind::Sink))
-    .with_edge(EdgeSpec::new(
-        EdgeId::fixture("edge-source-sink"),
-        source,
-        sink,
-        TransferSpec::Fixed { amount: 1.0 },
-    ));
+let mut scenario = ScenarioSpec::source_sink(TransferSpec::Fixed { amount: 1.0 });
 scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 3 }];
 scenario.tracked_metrics.insert(MetricKey::fixture("sink"));
 
@@ -58,7 +45,7 @@ assert_eq!(scenario.edges.len(), 1);
 ```
 
 What you learned:
-- how to model a minimum source->sink scenario,
+- how to bootstrap a minimum source->sink scenario with a convenience constructor,
 - how end conditions and tracked metrics are attached.
 
 ---
@@ -70,28 +57,14 @@ Compilation validates and transforms your scenario into deterministic execution 
 ### Snippet S02 — Compile a Scenario
 
 ```rust
-use anapao::types::{
-    EdgeId, EdgeSpec, EndConditionSpec, MetricKey, NodeId, NodeKind, NodeSpec, ScenarioId,
-    ScenarioSpec, TransferSpec,
-};
+use anapao::types::{EndConditionSpec, ScenarioSpec, TransferSpec};
 use anapao::Simulator;
 
-let source = NodeId::fixture("source");
-let sink = NodeId::fixture("sink");
-let mut scenario = ScenarioSpec::new(ScenarioId::fixture("scenario-readme"))
-    .with_node(NodeSpec::new(source.clone(), NodeKind::Source).with_initial_value(1.0))
-    .with_node(NodeSpec::new(sink.clone(), NodeKind::Sink))
-    .with_edge(EdgeSpec::new(
-        EdgeId::fixture("edge-source-sink"),
-        source,
-        sink,
-        TransferSpec::Fixed { amount: 1.0 },
-    ));
+let mut scenario = ScenarioSpec::source_sink(TransferSpec::Fixed { amount: 1.0 });
 scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 3 }];
-scenario.tracked_metrics.insert(MetricKey::fixture("sink"));
 
 let compiled = Simulator::compile(scenario).unwrap();
-assert_eq!(compiled.scenario.id.as_str(), "scenario-readme");
+assert_eq!(compiled.scenario.id.as_str(), "scenario-source-sink");
 ```
 
 What you learned:
