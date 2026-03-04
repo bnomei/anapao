@@ -418,6 +418,7 @@ mod tests {
             runs: 2,
             base_seed: 1,
             execution_mode: ExecutionMode::SingleThread,
+            confidence_level: Default::default(),
             run: RunConfig { seed: 1, max_steps: 0, capture: CaptureConfig::default() },
         };
         let batch_error =

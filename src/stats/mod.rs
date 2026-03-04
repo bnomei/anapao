@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::types::{MetricKey, PredictionMetricIndicators};
+use crate::types::{ConfidenceLevel, MetricKey, PredictionMetricIndicators};
 
 #[derive(Debug, Clone, PartialEq)]
 /// Streaming moments computed with Welford's online algorithm.
@@ -163,11 +163,12 @@ pub fn summarize_by_metric(
         .collect()
 }
 
-/// Computes a 95% confidence interval around the sample mean.
-pub fn mean_confidence_interval_95(values: &[f64]) -> Option<(f64, f64)> {
-    const Z_SCORE_95: f64 = 1.959_963_984_540_054;
-
-    let summary = summarize_streaming(values.iter().copied())?;
+/// Computes a confidence interval around the sample mean for a configured confidence level.
+pub fn mean_confidence_interval(
+    values: &[f64],
+    confidence_level: ConfidenceLevel,
+) -> Option<(f64, f64)> {
+    let summary = summarize(values)?;
     if summary.n == 1 {
         return Some((summary.mean, summary.mean));
     }
@@ -175,14 +176,23 @@ pub fn mean_confidence_interval_95(values: &[f64]) -> Option<(f64, f64)> {
     let n = summary.n as f64;
     let sample_variance = summary.variance * n / (n - 1.0);
     let standard_error = sample_variance.sqrt() / n.sqrt();
-    let margin = Z_SCORE_95 * standard_error;
+    let margin = confidence_level.z_score() * standard_error;
     Some((summary.mean - margin, summary.mean + margin))
 }
 
-/// Derives prediction-oriented indicators for one metric sample.
-pub fn prediction_indicators(values: &[f64]) -> Option<PredictionMetricIndicators> {
+/// Computes a 95% confidence interval around the sample mean.
+pub fn mean_confidence_interval_95(values: &[f64]) -> Option<(f64, f64)> {
+    mean_confidence_interval(values, ConfidenceLevel::P95)
+}
+
+/// Derives prediction-oriented indicators for one metric sample and confidence level.
+pub fn prediction_indicators_with_confidence(
+    values: &[f64],
+    confidence_level: ConfidenceLevel,
+) -> Option<PredictionMetricIndicators> {
     let summary = summarize(values)?;
-    let (confidence_lower_95, confidence_upper_95) = mean_confidence_interval_95(values)?;
+    let (confidence_lower_95, confidence_upper_95) =
+        mean_confidence_interval(values, confidence_level)?;
     let confidence_margin_95 = (confidence_upper_95 - confidence_lower_95) / 2.0;
 
     let convergence_delta = leading_trailing_delta(values)?;
@@ -211,16 +221,30 @@ pub fn prediction_indicators(values: &[f64]) -> Option<PredictionMetricIndicator
     })
 }
 
+/// Derives prediction-oriented indicators for one metric sample using a 95% confidence interval.
+pub fn prediction_indicators(values: &[f64]) -> Option<PredictionMetricIndicators> {
+    prediction_indicators_with_confidence(values, ConfidenceLevel::P95)
+}
+
 /// Computes prediction indicators for each metric, dropping invalid samples.
-pub fn prediction_indicators_by_metric(
+pub fn prediction_indicators_by_metric_with_confidence(
     values_by_metric: BTreeMap<MetricKey, Vec<f64>>,
+    confidence_level: ConfidenceLevel,
 ) -> BTreeMap<MetricKey, PredictionMetricIndicators> {
     values_by_metric
         .into_iter()
         .filter_map(|(metric, values)| {
-            prediction_indicators(&values).map(|summary| (metric, summary))
+            prediction_indicators_with_confidence(&values, confidence_level)
+                .map(|summary| (metric, summary))
         })
         .collect()
+}
+
+/// Computes prediction indicators for each metric, dropping invalid samples.
+pub fn prediction_indicators_by_metric(
+    values_by_metric: BTreeMap<MetricKey, Vec<f64>>,
+) -> BTreeMap<MetricKey, PredictionMetricIndicators> {
+    prediction_indicators_by_metric_with_confidence(values_by_metric, ConfidenceLevel::P95)
 }
 
 fn leading_trailing_delta(values: &[f64]) -> Option<f64> {
@@ -246,10 +270,12 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        mean_confidence_interval_95, percentile_sorted, prediction_indicators,
-        prediction_indicators_by_metric, summarize, summarize_by_metric, summarize_streaming,
+        mean_confidence_interval, mean_confidence_interval_95, percentile_sorted,
+        prediction_indicators, prediction_indicators_by_metric,
+        prediction_indicators_by_metric_with_confidence, prediction_indicators_with_confidence,
+        summarize, summarize_by_metric, summarize_streaming,
     };
-    use crate::types::MetricKey;
+    use crate::types::{ConfidenceLevel, MetricKey};
 
     const EPSILON: f64 = 1e-12;
 
@@ -395,6 +421,16 @@ mod tests {
     }
 
     #[test]
+    fn mean_confidence_interval_supports_90_95_and_99() {
+        let values = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let (_, upper_90) = mean_confidence_interval(&values, ConfidenceLevel::P90).expect("ci90");
+        let (_, upper_95) = mean_confidence_interval(&values, ConfidenceLevel::P95).expect("ci95");
+        let (_, upper_99) = mean_confidence_interval(&values, ConfidenceLevel::P99).expect("ci99");
+        assert!(upper_90 < upper_95);
+        assert!(upper_95 < upper_99);
+    }
+
+    #[test]
     fn mean_confidence_interval_95_single_value_has_zero_width() {
         let (lower, upper) = mean_confidence_interval_95(&[42.0]).expect("ci95");
         assert_close(lower, 42.0);
@@ -445,5 +481,36 @@ mod tests {
         let beta_summary = summaries.get(&beta).expect("beta summary");
         assert_close(beta_summary.mean, 2.5);
         assert_close(beta_summary.convergence_delta, 2.0);
+    }
+
+    #[test]
+    fn prediction_indicators_with_confidence_updates_margin() {
+        let values = [10.0, 12.0, 14.0, 16.0];
+        let p90 =
+            prediction_indicators_with_confidence(&values, ConfidenceLevel::P90).expect("p90");
+        let p95 =
+            prediction_indicators_with_confidence(&values, ConfidenceLevel::P95).expect("p95");
+        let p99 =
+            prediction_indicators_with_confidence(&values, ConfidenceLevel::P99).expect("p99");
+
+        assert!(p90.confidence_margin_95 < p95.confidence_margin_95);
+        assert!(p95.confidence_margin_95 < p99.confidence_margin_95);
+    }
+
+    #[test]
+    fn prediction_indicators_by_metric_with_confidence_updates_margin() {
+        let metric = MetricKey::fixture("alpha");
+        let values_by_metric = BTreeMap::from([(metric.clone(), vec![1.0, 2.0, 3.0, 4.0])]);
+
+        let p90 = prediction_indicators_by_metric_with_confidence(
+            values_by_metric.clone(),
+            ConfidenceLevel::P90,
+        );
+        let p99 =
+            prediction_indicators_by_metric_with_confidence(values_by_metric, ConfidenceLevel::P99);
+
+        let margin_90 = p90.get(&metric).expect("alpha p90").confidence_margin_95;
+        let margin_99 = p99.get(&metric).expect("alpha p99").confidence_margin_95;
+        assert!(margin_90 < margin_99);
     }
 }

@@ -433,6 +433,7 @@ fn benches_simulation_guardrails(c: &mut Criterion) {
         runs: 96,
         base_seed: 0xD1FF_EE11_u64,
         execution_mode: ExecutionMode::SingleThread,
+        confidence_level: Default::default(),
         run: RunConfig { seed: 123_456, max_steps: 64, capture: CaptureConfig::default() },
     };
     group.throughput(Throughput::Elements(expanded_batch_config.runs));
@@ -456,6 +457,7 @@ fn benches_simulation_guardrails(c: &mut Criterion) {
             runs: 96,
             base_seed: 0xD1FF_EE11_u64,
             execution_mode: ExecutionMode::Rayon,
+            confidence_level: Default::default(),
             run: RunConfig { seed: 123_456, max_steps: 64, capture: CaptureConfig::default() },
         };
         group.throughput(Throughput::Elements(expanded_batch_config_rayon.runs));
@@ -586,6 +588,7 @@ fn benches_simulation_hotspots(c: &mut Criterion) {
         runs: 24,
         base_seed: 0xA0A0_4242_u64,
         execution_mode: ExecutionMode::SingleThread,
+        confidence_level: Default::default(),
         run: RunConfig { seed: 0xC0DE_4510_u64, max_steps: 48, capture: CaptureConfig::disabled() },
     };
     group.throughput(Throughput::Elements(batch_expression_config.runs));
@@ -609,6 +612,7 @@ fn benches_simulation_hotspots(c: &mut Criterion) {
             runs: 24,
             base_seed: 0xA0A0_4242_u64,
             execution_mode: ExecutionMode::Rayon,
+            confidence_level: Default::default(),
             run: RunConfig {
                 seed: 0xC0DE_4510_u64,
                 max_steps: 48,

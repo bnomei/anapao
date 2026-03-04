@@ -8,7 +8,7 @@ use serde::Serialize;
 use crate::assertions::AssertionReport;
 use crate::error::ArtifactError;
 use crate::events::{sort_events_by_order, RunEvent};
-use crate::stats::prediction_indicators_by_metric;
+use crate::stats::prediction_indicators_by_metric_with_confidence;
 use crate::types::{
     ArtifactKind, ArtifactRef, BatchReport, HistoryIndexEntry, HistoryIndexReport, ManifestRef,
     MetricKey, PredictionSummaryReport, ReplayIndexReport, ReplayRunIndex, RunReport,
@@ -598,7 +598,10 @@ fn prediction_summary_report(batch_report: &BatchReport) -> PredictionSummaryRep
 
     PredictionSummaryReport::new(
         batch_report.scenario_id.clone(),
-        prediction_indicators_by_metric(values_by_metric),
+        prediction_indicators_by_metric_with_confidence(
+            values_by_metric,
+            batch_report.confidence_level,
+        ),
     )
 }
 
@@ -616,9 +619,9 @@ mod tests {
         DebugEvent, NodeUpdateEvent, RunEvent, StepEndEvent, StepStartEvent, ViolationEvent,
     };
     use crate::types::{
-        BatchReport, BatchRunSummary, DiagnosticSeverity, ExecutionMode, HistoryIndexReport,
-        MetricKey, NodeId, PredictionSummaryReport, ReplayIndexReport, RunReport, ScenarioId,
-        SeriesPoint, SeriesTable, ARTIFACT_SCHEMA_VERSION_V2,
+        BatchReport, BatchRunSummary, ConfidenceLevel, DiagnosticSeverity, ExecutionMode,
+        HistoryIndexReport, MetricKey, NodeId, PredictionSummaryReport, ReplayIndexReport,
+        RunReport, ScenarioId, SeriesPoint, SeriesTable, ARTIFACT_SCHEMA_VERSION_V2,
     };
 
     use super::{
@@ -901,6 +904,82 @@ mod tests {
         assert_eq!(beta_cols.len(), 17);
         assert_eq!(alpha_cols[15], "10.0");
         assert_eq!(beta_cols[15], "2.0");
+    }
+
+    #[test]
+    fn write_batch_artifacts_uses_configured_confidence_level() {
+        let tempdir_90 = tempdir().expect("tempdir90");
+        let tempdir_99 = tempdir().expect("tempdir99");
+
+        let mut report_90 = BatchReport::new(
+            ScenarioId::fixture("scenario-batch-ci90"),
+            4,
+            ExecutionMode::SingleThread,
+        );
+        report_90.confidence_level = ConfidenceLevel::P90;
+        report_90.runs = vec![
+            BatchRunSummary {
+                run_index: 0,
+                seed: 10,
+                completed: true,
+                steps_executed: 3,
+                final_metrics: BTreeMap::from([(MetricKey::fixture("alpha"), 10.0)]),
+                manifest: None,
+            },
+            BatchRunSummary {
+                run_index: 1,
+                seed: 11,
+                completed: true,
+                steps_executed: 3,
+                final_metrics: BTreeMap::from([(MetricKey::fixture("alpha"), 12.0)]),
+                manifest: None,
+            },
+            BatchRunSummary {
+                run_index: 2,
+                seed: 12,
+                completed: true,
+                steps_executed: 3,
+                final_metrics: BTreeMap::from([(MetricKey::fixture("alpha"), 14.0)]),
+                manifest: None,
+            },
+            BatchRunSummary {
+                run_index: 3,
+                seed: 13,
+                completed: true,
+                steps_executed: 3,
+                final_metrics: BTreeMap::from([(MetricKey::fixture("alpha"), 16.0)]),
+                manifest: None,
+            },
+        ];
+        report_90.completed_runs = report_90.runs.len() as u64;
+
+        let mut report_99 = report_90.clone();
+        report_99.scenario_id = ScenarioId::fixture("scenario-batch-ci99");
+        report_99.confidence_level = ConfidenceLevel::P99;
+
+        write_batch_artifacts(tempdir_90.path(), &report_90).expect("write ci90 batch artifacts");
+        write_batch_artifacts(tempdir_99.path(), &report_99).expect("write ci99 batch artifacts");
+
+        let prediction_90 = serde_json::from_slice::<PredictionSummaryReport>(
+            &fs::read(tempdir_90.path().join(PREDICTION_FILE)).expect("read ci90 prediction"),
+        )
+        .expect("parse ci90 prediction");
+        let prediction_99 = serde_json::from_slice::<PredictionSummaryReport>(
+            &fs::read(tempdir_99.path().join(PREDICTION_FILE)).expect("read ci99 prediction"),
+        )
+        .expect("parse ci99 prediction");
+
+        let margin_90 = prediction_90
+            .metrics
+            .get(&MetricKey::fixture("alpha"))
+            .expect("alpha ci90")
+            .confidence_margin_95;
+        let margin_99 = prediction_99
+            .metrics
+            .get(&MetricKey::fixture("alpha"))
+            .expect("alpha ci99")
+            .confidence_margin_95;
+        assert!(margin_90 < margin_99);
     }
 
     #[test]

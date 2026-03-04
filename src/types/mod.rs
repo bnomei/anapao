@@ -652,6 +652,27 @@ pub enum ExecutionMode {
     Rayon,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+/// Supported confidence levels for prediction interval diagnostics.
+pub enum ConfidenceLevel {
+    P90,
+    #[default]
+    P95,
+    P99,
+}
+
+impl ConfidenceLevel {
+    /// Returns the two-sided normal-distribution Z-score for this confidence level.
+    pub fn z_score(self) -> f64 {
+        match self {
+            Self::P90 => 1.644_853_626_951_472_2,
+            Self::P95 => 1.959_963_984_540_054,
+            Self::P99 => 2.575_829_303_548_900_4,
+        }
+    }
+}
+
 /// Capture policy for per-step node and metric snapshots.
 ///
 /// Use [`CaptureConfig::default`] for debugging/analysis-friendly traces
@@ -756,6 +777,8 @@ pub struct BatchConfig {
     pub runs: u64,
     pub base_seed: u64,
     pub execution_mode: ExecutionMode,
+    #[serde(default)]
+    pub confidence_level: ConfidenceLevel,
     pub run: RunConfig,
 }
 
@@ -765,6 +788,7 @@ impl Default for BatchConfig {
             runs: 1,
             base_seed: 0,
             execution_mode: ExecutionMode::default(),
+            confidence_level: ConfidenceLevel::default(),
             run: RunConfig::default(),
         }
     }
@@ -1269,6 +1293,8 @@ pub struct BatchReport {
     pub requested_runs: u64,
     pub completed_runs: u64,
     pub execution_mode: ExecutionMode,
+    #[serde(default)]
+    pub confidence_level: ConfidenceLevel,
     pub runs: Vec<BatchRunSummary>,
     pub aggregate_series: BTreeMap<MetricKey, SeriesTable>,
     pub manifest: Option<ManifestRef>,
@@ -1286,6 +1312,7 @@ impl BatchReport {
             requested_runs,
             completed_runs: 0,
             execution_mode,
+            confidence_level: ConfidenceLevel::default(),
             runs: Vec::new(),
             aggregate_series: BTreeMap::new(),
             manifest: None,
@@ -1599,6 +1626,9 @@ mod tests {
         assert_eq!(run.seed, 99);
         assert_eq!(run.max_steps, 100);
         assert_eq!(run.capture, CaptureConfig::default());
+
+        let batch = BatchConfig::default();
+        assert_eq!(batch.confidence_level, ConfidenceLevel::P95);
     }
 
     #[test]
