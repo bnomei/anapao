@@ -273,10 +273,7 @@ impl<'a> Lexer<'a> {
                     self.pos += 1;
                     Token::EqualEqual
                 } else {
-                    return Err(ExprError::UnexpectedToken {
-                        token: "=".to_string(),
-                        position,
-                    });
+                    return Err(ExprError::UnexpectedToken { token: "=".to_string(), position });
                 }
             }
             b'!' => {
@@ -285,10 +282,7 @@ impl<'a> Lexer<'a> {
                     self.pos += 1;
                     Token::BangEqual
                 } else {
-                    return Err(ExprError::UnexpectedToken {
-                        token: "!".to_string(),
-                        position,
-                    });
+                    return Err(ExprError::UnexpectedToken { token: "!".to_string(), position });
                 }
             }
             b'(' => {
@@ -736,7 +730,11 @@ fn modulo(name: &str, args: &[f64]) -> Result<f64, ExprError> {
 }
 
 fn bool_to_f64(value: bool) -> f64 {
-    if value { 1.0 } else { 0.0 }
+    if value {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 fn collect_variable_refs(expr: &Expr, out: &mut BTreeSet<String>) {
