@@ -883,7 +883,7 @@ mod tests {
                 assert_eq!(graph, "scenario[scenario].metrics");
                 assert_eq!(
                     reference,
-                    "tracked_metrics[missing-metric] references unresolved metric `missing-metric`"
+                    "tracked_metrics[missing-metric] references unresolved metric `missing-metric`; hint: choose one of the available metric keys: [node-a, node-b]"
                 );
             }
             other => panic!("expected InvalidGraphReference, got {other:?}"),
