@@ -629,15 +629,17 @@ impl CaptureConfig {
 ///
 /// # Example
 /// ```rust
-/// use anapao::types::RunConfig;
+/// use anapao::types::{CaptureConfig, RunConfig};
 ///
-/// let mut run = RunConfig::for_seed(42);
-/// run.max_steps = 250;
-/// run.capture.every_n_steps = 5;
-/// run.capture.include_step_zero = false;
+/// let run = RunConfig::for_seed(42).with_max_steps(250).with_capture(CaptureConfig {
+///     every_n_steps: 5,
+///     include_step_zero: false,
+///     ..CaptureConfig::default()
+/// });
 ///
 /// assert_eq!(run.seed, 42);
 /// assert_eq!(run.max_steps, 250);
+/// assert_eq!(run.capture.every_n_steps, 5);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunConfig {
@@ -657,6 +659,18 @@ impl RunConfig {
     pub fn for_seed(seed: u64) -> Self {
         Self { seed, ..Self::default() }
     }
+
+    /// Sets the run step limit.
+    pub fn with_max_steps(mut self, max_steps: u64) -> Self {
+        self.max_steps = max_steps;
+        self
+    }
+
+    /// Replaces capture settings for the run.
+    pub fn with_capture(mut self, capture: CaptureConfig) -> Self {
+        self.capture = capture;
+        self
+    }
 }
 
 /// Deterministic Monte Carlo controls for many runs.
@@ -665,16 +679,18 @@ impl RunConfig {
 ///
 /// # Example
 /// ```rust
-/// use anapao::types::{BatchConfig, ExecutionMode, RunConfig};
+/// use anapao::types::{BatchConfig, CaptureConfig, ExecutionMode, RunConfig};
 ///
-/// let mut batch = BatchConfig::for_runs(128);
-/// batch.base_seed = 7;
-/// batch.execution_mode = ExecutionMode::SingleThread;
-/// batch.run = RunConfig::for_seed(999);
-/// batch.run.max_steps = 50;
+/// let batch = BatchConfig::for_runs(128)
+///     .with_execution_mode(ExecutionMode::SingleThread)
+///     .with_run(RunConfig::for_seed(999))
+///     .with_max_steps(50)
+///     .with_capture(CaptureConfig::disabled());
 ///
 /// assert_eq!(batch.runs, 128);
-/// assert_eq!(batch.base_seed, 7);
+/// assert_eq!(batch.execution_mode, ExecutionMode::SingleThread);
+/// assert_eq!(batch.run.seed, 999);
+/// assert_eq!(batch.run.max_steps, 50);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BatchConfig {
@@ -699,6 +715,30 @@ impl BatchConfig {
     /// Creates a batch config from a requested run count and default options.
     pub fn for_runs(runs: u64) -> Self {
         Self { runs, ..Self::default() }
+    }
+
+    /// Sets execution mode for the batch.
+    pub fn with_execution_mode(mut self, execution_mode: ExecutionMode) -> Self {
+        self.execution_mode = execution_mode;
+        self
+    }
+
+    /// Replaces the default run template used for each batch run.
+    pub fn with_run(mut self, run: RunConfig) -> Self {
+        self.run = run;
+        self
+    }
+
+    /// Sets max steps on the batch run template.
+    pub fn with_max_steps(mut self, max_steps: u64) -> Self {
+        self.run.max_steps = max_steps;
+        self
+    }
+
+    /// Replaces capture settings on the batch run template.
+    pub fn with_capture(mut self, capture: CaptureConfig) -> Self {
+        self.run.capture = capture;
+        self
     }
 }
 
@@ -1451,6 +1491,42 @@ mod tests {
         assert_eq!(run.seed, 99);
         assert_eq!(run.max_steps, 100);
         assert_eq!(run.capture, CaptureConfig::default());
+    }
+
+    #[test]
+    fn run_config_builders_override_defaults() {
+        let capture = CaptureConfig {
+            every_n_steps: 5,
+            include_step_zero: false,
+            include_final_state: false,
+            ..CaptureConfig::default()
+        };
+        let run = RunConfig::for_seed(77).with_max_steps(250).with_capture(capture.clone());
+
+        assert_eq!(run.seed, 77);
+        assert_eq!(run.max_steps, 250);
+        assert_eq!(run.capture, capture);
+    }
+
+    #[test]
+    fn batch_config_builders_update_execution_and_run_template() {
+        let capture = CaptureConfig {
+            every_n_steps: 3,
+            include_step_zero: false,
+            include_final_state: true,
+            ..CaptureConfig::default()
+        };
+        let batch = BatchConfig::for_runs(12)
+            .with_execution_mode(ExecutionMode::SingleThread)
+            .with_run(RunConfig::for_seed(991))
+            .with_max_steps(40)
+            .with_capture(capture.clone());
+
+        assert_eq!(batch.runs, 12);
+        assert_eq!(batch.execution_mode, ExecutionMode::SingleThread);
+        assert_eq!(batch.run.seed, 991);
+        assert_eq!(batch.run.max_steps, 40);
+        assert_eq!(batch.run.capture, capture);
     }
 
     #[test]

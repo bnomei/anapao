@@ -107,13 +107,14 @@ What you learned:
 ### Snippet S03 — Create a Deterministic RunConfig
 
 ```rust
-use anapao::types::RunConfig;
+use anapao::types::{CaptureConfig, RunConfig};
 
-let mut run = RunConfig::for_seed(42);
-run.max_steps = 250;
-run.capture.every_n_steps = 5;
-run.capture.include_step_zero = true;
-run.capture.include_final_state = true;
+let run = RunConfig::for_seed(42).with_max_steps(250).with_capture(CaptureConfig {
+    every_n_steps: 5,
+    include_step_zero: true,
+    include_final_state: true,
+    ..CaptureConfig::default()
+});
 
 assert_eq!(run.seed, 42);
 assert_eq!(run.max_steps, 250);
@@ -240,11 +241,11 @@ What you learned:
 ```rust
 use anapao::types::{BatchConfig, ExecutionMode, RunConfig};
 
-let mut batch = BatchConfig::for_runs(64);
+let mut batch = BatchConfig::for_runs(64)
+    .with_execution_mode(ExecutionMode::SingleThread)
+    .with_run(RunConfig::for_seed(999))
+    .with_max_steps(50);
 batch.base_seed = 7;
-batch.execution_mode = ExecutionMode::SingleThread;
-batch.run = RunConfig::for_seed(999);
-batch.run.max_steps = 50;
 
 assert_eq!(batch.runs, 64);
 assert_eq!(batch.base_seed, 7);
