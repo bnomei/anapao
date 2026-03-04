@@ -960,15 +960,24 @@ pub struct PredictionMetricIndicators {
     pub confidence_lower_95: f64,
     pub confidence_upper_95: f64,
     pub confidence_margin_95: f64,
+    pub confidence_lower_selected: f64,
+    pub confidence_upper_selected: f64,
+    pub confidence_margin_selected: f64,
     pub reliability_score: f64,
     pub convergence_delta: f64,
     pub convergence_ratio: f64,
+}
+
+fn default_prediction_selected_confidence_level() -> ConfidenceLevel {
+    ConfidenceLevel::default()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 /// Aggregated prediction diagnostics for one scenario.
 pub struct PredictionSummaryReport {
     pub scenario_id: ScenarioId,
+    #[serde(default = "default_prediction_selected_confidence_level")]
+    pub selected_confidence_level: ConfidenceLevel,
     pub metrics: BTreeMap<MetricKey, PredictionMetricIndicators>,
 }
 
@@ -978,7 +987,20 @@ impl PredictionSummaryReport {
         scenario_id: ScenarioId,
         metrics: BTreeMap<MetricKey, PredictionMetricIndicators>,
     ) -> Self {
-        Self { scenario_id, metrics }
+        Self::new_with_confidence_level(
+            scenario_id,
+            default_prediction_selected_confidence_level(),
+            metrics,
+        )
+    }
+
+    /// Creates a prediction summary report for an explicit confidence level.
+    pub fn new_with_confidence_level(
+        scenario_id: ScenarioId,
+        selected_confidence_level: ConfidenceLevel,
+        metrics: BTreeMap<MetricKey, PredictionMetricIndicators>,
+    ) -> Self {
+        Self { scenario_id, selected_confidence_level, metrics }
     }
 }
 
@@ -1742,6 +1764,9 @@ mod tests {
                         confidence_lower_95: 0.0,
                         confidence_upper_95: 4.0,
                         confidence_margin_95: 2.0,
+                        confidence_lower_selected: 0.0,
+                        confidence_upper_selected: 4.0,
+                        confidence_margin_selected: 2.0,
                         reliability_score: 0.5,
                         convergence_delta: 1.0,
                         convergence_ratio: 0.5,
@@ -1763,6 +1788,9 @@ mod tests {
                         confidence_lower_95: 10.0,
                         confidence_upper_95: 10.0,
                         confidence_margin_95: 0.0,
+                        confidence_lower_selected: 10.0,
+                        confidence_upper_selected: 10.0,
+                        confidence_margin_selected: 0.0,
                         reliability_score: 1.0,
                         convergence_delta: 0.0,
                         convergence_ratio: 0.0,
@@ -1774,6 +1802,7 @@ mod tests {
         let encoded = serde_json::to_string(&report).expect("prediction report should serialize");
         let decoded: PredictionSummaryReport =
             serde_json::from_str(&encoded).expect("prediction report should deserialize");
+        assert_eq!(decoded.selected_confidence_level, ConfidenceLevel::P95);
         let keys: Vec<&str> = decoded.metrics.keys().map(MetricKey::as_str).collect();
         assert_eq!(keys, vec!["alpha", "beta"]);
     }

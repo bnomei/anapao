@@ -371,6 +371,10 @@ fn write_summary_csv(
             "ci95_lower",
             "ci95_upper",
             "ci95_margin",
+            "selected_confidence_level",
+            "ci_selected_lower",
+            "ci_selected_upper",
+            "ci_selected_margin",
             "reliability_score",
             "convergence_delta",
             "convergence_ratio",
@@ -391,6 +395,11 @@ fn write_summary_csv(
         let ci95_lower = format_f64(summary.confidence_lower_95);
         let ci95_upper = format_f64(summary.confidence_upper_95);
         let ci95_margin = format_f64(summary.confidence_margin_95);
+        let selected_confidence_level =
+            confidence_level_label(prediction_report.selected_confidence_level);
+        let ci_selected_lower = format_f64(summary.confidence_lower_selected);
+        let ci_selected_upper = format_f64(summary.confidence_upper_selected);
+        let ci_selected_margin = format_f64(summary.confidence_margin_selected);
         let reliability_score = format_f64(summary.reliability_score);
         let convergence_delta = format_f64(summary.convergence_delta);
         let convergence_ratio = format_f64(summary.convergence_ratio);
@@ -413,6 +422,10 @@ fn write_summary_csv(
                 ci95_lower.as_str(),
                 ci95_upper.as_str(),
                 ci95_margin.as_str(),
+                selected_confidence_level,
+                ci_selected_lower.as_str(),
+                ci_selected_upper.as_str(),
+                ci_selected_margin.as_str(),
                 reliability_score.as_str(),
                 convergence_delta.as_str(),
                 convergence_ratio.as_str(),
@@ -456,6 +469,14 @@ fn encode_csv_field(value: &str) -> String {
 fn format_f64(value: f64) -> String {
     let mut buffer = ryu::Buffer::new();
     buffer.format(value).to_owned()
+}
+
+fn confidence_level_label(confidence_level: ConfidenceLevel) -> &'static str {
+    match confidence_level {
+        ConfidenceLevel::P90 => "p90",
+        ConfidenceLevel::P95 => "p95",
+        ConfidenceLevel::P99 => "p99",
+    }
 }
 
 fn run_seed_strategy(run_report: &RunReport) -> String {
@@ -611,8 +632,9 @@ fn prediction_summary_report(
         }
     }
 
-    PredictionSummaryReport::new(
+    PredictionSummaryReport::new_with_confidence_level(
         batch_report.scenario_id.clone(),
+        confidence_level,
         prediction_indicators_by_metric_with_confidence(values_by_metric, confidence_level),
     )
 }
@@ -878,6 +900,7 @@ mod tests {
             &fs::read(&prediction_path).expect("read prediction"),
         )
         .expect("parse prediction");
+        assert_eq!(prediction.selected_confidence_level, ConfidenceLevel::P95);
         let prediction_keys = prediction.metrics.keys().map(MetricKey::as_str).collect::<Vec<_>>();
         assert_eq!(prediction_keys, vec!["alpha", "beta"]);
 
@@ -903,7 +926,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             summary_rows[0],
-            "metric,n,mean,variance,std_dev,min,max,median,p90,p95,p99,ci95_lower,ci95_upper,ci95_margin,reliability_score,convergence_delta,convergence_ratio"
+            "metric,n,mean,variance,std_dev,min,max,median,p90,p95,p99,ci95_lower,ci95_upper,ci95_margin,selected_confidence_level,ci_selected_lower,ci_selected_upper,ci_selected_margin,reliability_score,convergence_delta,convergence_ratio"
         );
         assert_eq!(summary_rows.len(), 3);
 
@@ -913,15 +936,18 @@ mod tests {
         assert_eq!(beta_cols[0], "beta");
         assert_eq!(alpha_cols[1], "2");
         assert_eq!(beta_cols[1], "2");
-        assert_eq!(alpha_cols.len(), 17);
-        assert_eq!(beta_cols.len(), 17);
-        assert_eq!(alpha_cols[15], "10.0");
-        assert_eq!(beta_cols[15], "2.0");
+        assert_eq!(alpha_cols[14], "p95");
+        assert_eq!(beta_cols[14], "p95");
+        assert_eq!(alpha_cols.len(), 21);
+        assert_eq!(beta_cols.len(), 21);
+        assert_eq!(alpha_cols[19], "10.0");
+        assert_eq!(beta_cols[19], "2.0");
     }
 
     #[test]
     fn write_batch_artifacts_uses_configured_confidence_level() {
         let tempdir_90 = tempdir().expect("tempdir90");
+        let tempdir_95 = tempdir().expect("tempdir95");
         let tempdir_99 = tempdir().expect("tempdir99");
 
         let mut report = BatchReport::new(
@@ -972,6 +998,12 @@ mod tests {
         )
         .expect("write ci90 batch artifacts");
         write_batch_artifacts_with_confidence_level(
+            tempdir_95.path(),
+            &report,
+            ConfidenceLevel::P95,
+        )
+        .expect("write ci95 batch artifacts");
+        write_batch_artifacts_with_confidence_level(
             tempdir_99.path(),
             &report,
             ConfidenceLevel::P99,
@@ -986,18 +1018,50 @@ mod tests {
             &fs::read(tempdir_99.path().join(PREDICTION_FILE)).expect("read ci99 prediction"),
         )
         .expect("parse ci99 prediction");
+        let prediction_95 = serde_json::from_slice::<PredictionSummaryReport>(
+            &fs::read(tempdir_95.path().join(PREDICTION_FILE)).expect("read ci95 prediction"),
+        )
+        .expect("parse ci95 prediction");
 
-        let margin_90 = prediction_90
+        assert_eq!(prediction_90.selected_confidence_level, ConfidenceLevel::P90);
+        assert_eq!(prediction_95.selected_confidence_level, ConfidenceLevel::P95);
+        assert_eq!(prediction_99.selected_confidence_level, ConfidenceLevel::P99);
+
+        let ci95_margin_90 = prediction_90
             .metrics
             .get(&MetricKey::fixture("alpha"))
             .expect("alpha ci90")
             .confidence_margin_95;
-        let margin_99 = prediction_99
+        let ci95_margin_95 = prediction_95
+            .metrics
+            .get(&MetricKey::fixture("alpha"))
+            .expect("alpha ci95")
+            .confidence_margin_95;
+        let ci95_margin_99 = prediction_99
             .metrics
             .get(&MetricKey::fixture("alpha"))
             .expect("alpha ci99")
             .confidence_margin_95;
-        assert!(margin_90 < margin_99);
+        assert_eq!(ci95_margin_90, ci95_margin_95);
+        assert_eq!(ci95_margin_95, ci95_margin_99);
+
+        let margin_selected_90 = prediction_90
+            .metrics
+            .get(&MetricKey::fixture("alpha"))
+            .expect("alpha ci90")
+            .confidence_margin_selected;
+        let margin_selected_95 = prediction_95
+            .metrics
+            .get(&MetricKey::fixture("alpha"))
+            .expect("alpha ci95")
+            .confidence_margin_selected;
+        let margin_selected_99 = prediction_99
+            .metrics
+            .get(&MetricKey::fixture("alpha"))
+            .expect("alpha ci99")
+            .confidence_margin_selected;
+        assert!(margin_selected_90 < margin_selected_95);
+        assert!(margin_selected_95 < margin_selected_99);
     }
 
     #[test]

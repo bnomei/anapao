@@ -191,13 +191,15 @@ pub fn prediction_indicators_with_confidence(
     confidence_level: ConfidenceLevel,
 ) -> Option<PredictionMetricIndicators> {
     let summary = summarize(values)?;
-    let (confidence_lower_95, confidence_upper_95) =
-        mean_confidence_interval(values, confidence_level)?;
+    let (confidence_lower_95, confidence_upper_95) = mean_confidence_interval_95(values)?;
     let confidence_margin_95 = (confidence_upper_95 - confidence_lower_95) / 2.0;
+    let (confidence_lower_selected, confidence_upper_selected) =
+        mean_confidence_interval(values, confidence_level)?;
+    let confidence_margin_selected = (confidence_upper_selected - confidence_lower_selected) / 2.0;
 
     let convergence_delta = leading_trailing_delta(values)?;
     let baseline = summary.mean.abs() + 1.0;
-    let relative_margin = confidence_margin_95 / baseline;
+    let relative_margin = confidence_margin_selected / baseline;
     let relative_dispersion = summary.std_dev / baseline;
     let reliability_score = 1.0 / (1.0 + relative_margin + relative_dispersion);
 
@@ -215,6 +217,9 @@ pub fn prediction_indicators_with_confidence(
         confidence_lower_95,
         confidence_upper_95,
         confidence_margin_95,
+        confidence_lower_selected,
+        confidence_upper_selected,
+        confidence_margin_selected,
         reliability_score,
         convergence_delta,
         convergence_ratio: convergence_delta / baseline,
@@ -454,6 +459,9 @@ mod tests {
         assert_close(indicators.confidence_lower_95, 10.469_697_376_236_681);
         assert_close(indicators.confidence_upper_95, 15.530_302_623_763_319);
         assert_close(indicators.confidence_margin_95, 2.530_302_623_763_319);
+        assert_close(indicators.confidence_lower_selected, 10.469_697_376_236_681);
+        assert_close(indicators.confidence_upper_selected, 15.530_302_623_763_319);
+        assert_close(indicators.confidence_margin_selected, 2.530_302_623_763_319);
         assert!(indicators.reliability_score > 0.0 && indicators.reliability_score <= 1.0);
         assert_close(indicators.convergence_delta, 4.0);
         assert_close(indicators.convergence_ratio, 0.285_714_285_714_285_7);
@@ -493,8 +501,10 @@ mod tests {
         let p99 =
             prediction_indicators_with_confidence(&values, ConfidenceLevel::P99).expect("p99");
 
-        assert!(p90.confidence_margin_95 < p95.confidence_margin_95);
-        assert!(p95.confidence_margin_95 < p99.confidence_margin_95);
+        assert_close(p90.confidence_margin_95, p95.confidence_margin_95);
+        assert_close(p95.confidence_margin_95, p99.confidence_margin_95);
+        assert!(p90.confidence_margin_selected < p95.confidence_margin_selected);
+        assert!(p95.confidence_margin_selected < p99.confidence_margin_selected);
     }
 
     #[test]
@@ -509,8 +519,9 @@ mod tests {
         let p99 =
             prediction_indicators_by_metric_with_confidence(values_by_metric, ConfidenceLevel::P99);
 
-        let margin_90 = p90.get(&metric).expect("alpha p90").confidence_margin_95;
-        let margin_99 = p99.get(&metric).expect("alpha p99").confidence_margin_95;
-        assert!(margin_90 < margin_99);
+        let alpha_90 = p90.get(&metric).expect("alpha p90");
+        let alpha_99 = p99.get(&metric).expect("alpha p99");
+        assert_close(alpha_90.confidence_margin_95, alpha_99.confidence_margin_95);
+        assert!(alpha_90.confidence_margin_selected < alpha_99.confidence_margin_selected);
     }
 }
