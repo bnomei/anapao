@@ -9,8 +9,6 @@
 use std::time::Duration;
 
 use criterion::Criterion;
-#[cfg(all(unix, not(target_os = "windows")))]
-use pprof::criterion::{Output, PProfProfiler};
 
 fn env_usize(name: &str, default: usize) -> usize {
     std::env::var(name).ok().and_then(|raw| raw.trim().parse::<usize>().ok()).unwrap_or(default)
@@ -20,27 +18,13 @@ fn env_u64(name: &str, default: u64) -> u64 {
     std::env::var(name).ok().and_then(|raw| raw.trim().parse::<u64>().ok()).unwrap_or(default)
 }
 
-#[cfg(all(unix, not(target_os = "windows")))]
-fn env_i32(name: &str, default: i32) -> i32 {
-    std::env::var(name).ok().and_then(|raw| raw.trim().parse::<i32>().ok()).unwrap_or(default)
-}
-
 pub fn criterion() -> Criterion {
     let sample_size = env_usize("BENCH_SAMPLE_SIZE", 60).clamp(10, 200);
     let warmup_secs = env_u64("BENCH_WARMUP_SECS", 3).clamp(1, 60);
     let measurement_secs = env_u64("BENCH_MEASUREMENT_SECS", 5).clamp(1, 120);
 
-    let criterion = Criterion::default()
+    Criterion::default()
         .sample_size(sample_size)
         .warm_up_time(Duration::from_secs(warmup_secs))
-        .measurement_time(Duration::from_secs(measurement_secs));
-
-    #[cfg(all(unix, not(target_os = "windows")))]
-    {
-        let profile_hz = env_i32("PROFILE_FREQ", 100).clamp(10, 1000);
-        return criterion.with_profiler(PProfProfiler::new(profile_hz, Output::Flamegraph(None)));
-    }
-
-    #[allow(unreachable_code)]
-    criterion
+        .measurement_time(Duration::from_secs(measurement_secs))
 }
