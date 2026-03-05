@@ -25,7 +25,7 @@ Add the dependency:
 
 ```toml
 [dependencies]
-anapao = "0.1.1"
+anapao = "0.1.0"
 ```
 
 ---
