@@ -1,5 +1,10 @@
 # anapao
 
+[![Crates.io Version](https://img.shields.io/crates/v/anapao)](https://crates.io/crates/anapao)
+[![CI](https://img.shields.io/github/actions/workflow/status/bnomei/anapao/ci.yml?branch=main)](https://github.com/bnomei/anapao/actions/workflows/ci.yml)
+[![CodSpeed](https://img.shields.io/github/actions/workflow/status/bnomei/anapao/codspeed.yml?branch=main&label=codspeed)](https://github.com/bnomei/anapao/actions/workflows/codspeed.yml)
+[![Crates.io Downloads](https://img.shields.io/crates/d/anapao)](https://crates.io/crates/anapao)
+[![License](https://img.shields.io/crates/l/anapao)](https://crates.io/crates/anapao)
 [![Discord](https://flat.badgen.net/badge/discord/bnomei?color=7289da&icon=discord&label)](https://discordapp.com/users/bnomei)
 [![Buymecoffee](https://flat.badgen.net/badge/icon/donate?icon=buymeacoffee&color=FF813F&label)](https://www.buymeacoffee.com/bnomei)
 
