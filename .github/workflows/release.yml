@@ -22,7 +22,6 @@ jobs:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -54,6 +53,13 @@ jobs:
         uses: taiki-e/setup-cross-toolchain-action@b8d1a322a6009a2b7220f53996695778eef89b41 # v1
         with:
           target: ${{ matrix.target }}
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ runner.os }}-${{ matrix.target }}
+          save-if: ${{ github.event_name != 'pull_request' }}
+          cache-on-failure: true
 
       - name: Resolve version
         id: version

@@ -407,3 +407,15 @@ cargo bench --no-run
 ./benchmarks/run_profiles.sh
 BENCH_FEATURES=parallel ./benchmarks/run_profiles.sh
 ```
+
+## Local Pre-commit
+
+This repo ships a native `prek.toml` for fast local commit gates.
+
+```bash
+prek validate-config
+prek run --all-files
+prek install
+```
+
+The hooks intentionally stay lightweight: `cargo fmt --all -- --check` and `cargo clippy --all-targets --all-features -- -D warnings`.

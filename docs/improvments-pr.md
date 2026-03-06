@@ -1,9 +1,11 @@
 # Improvements PR Summary (W1.1-W1.12)
 
 ## Overview
+
 This document summarizes Waves W1.1 through W1.12 that were integrated for the improvements stream and landed via PR #2. Scope covered API ergonomics, validation clarity/safety, statistical reporting, deterministic and failure-path test coverage, CI enforcement, integration closeout, and confidence-interval semantics correction.
 
 ## Wave-by-wave summary
+
 - **W1.1** (`1a961a6`): Added fluent builders for `RunConfig` and `BatchConfig` to improve config ergonomics.
 - **W1.2** (`7edecf2`): Added `ScenarioSpec` convenience constructors for simpler scenario setup.
 - **W1.3** (`589ca89`): Improved validation errors with actionable reference hints.
@@ -18,6 +20,7 @@ This document summarizes Waves W1.1 through W1.12 that were integrated for the i
 - **W1.12** (`c66f832`): Fixed confidence interval field-label semantics and added explicit selected-confidence reporting in artifacts.
 
 ## Compatibility/Schema notes
+
 - Most wave outputs are additive (new builders, constructors, tests, CI coverage, and expression/stat coverage).
 - W1.6 retained compatibility for existing struct-literal expectations while introducing confidence-level configurability.
 - **W1.12 semantics fix (explicit):**
@@ -26,6 +29,7 @@ This document summarizes Waves W1.1 through W1.12 that were integrated for the i
   - Existing `*_95` / `ci95_*` consumers remain supported; downstream CSV consumers should parse by header names (not positional assumptions) for additive columns.
 
 ## Verification commands
+
 ```bash
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
@@ -33,7 +37,8 @@ cargo test --all-targets
 ```
 
 ## PR references
-- PR: https://github.com/bnomei/anapao/pull/2
+
+- PR: [https://github.com/bnomei/anapao/pull/2](https://github.com/bnomei/anapao/pull/2)
 - Merge commit on `main`: `07676b2` (`Merge pull request #2 from bnomei/plan-anpao-improvements`).
 - Key integration/fix commits:
   - `22f4f9e` (W1.11 integration follow-up alignment)
