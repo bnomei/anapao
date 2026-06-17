@@ -8,7 +8,7 @@
 [![Discord](https://flat.badgen.net/badge/discord/bnomei?color=7289da&icon=discord&label)](https://discordapp.com/users/bnomei)
 [![Buymecoffee](https://flat.badgen.net/badge/icon/donate?icon=buymeacoffee&color=FF813F&label)](https://www.buymeacoffee.com/bnomei)
 
-`anapao` is a library-only deterministic Rust testing utility for simulation and stochastic workflows. It is intended to be used from Rust tests and tooling through the crate API, not as a command-line program.  
+`anapao` is a library-only deterministic Rust testing utility for simulation and stochastic workflows. It is intended to be used from Rust tests and tooling through the crate API, not as a command-line program.
 This README is a linear tutorial for new users: you will build one scenario, run it deterministically, add expectations, run Monte Carlo batches, and persist CI-friendly artifacts.
 
 The README and generated crate documentation are self-contained public documentation. Any ignored local `docs/` directory is reserved for private research notes and is not tracked, packaged, shipped, or required to use the crate.
@@ -364,6 +364,11 @@ What you learned:
 - `analysis-polars`: enables Polars DataFrame shaping helpers.
 - `assertions-extended`: enables extra assertion/snapshot/property helper crates.
 
+CI intentionally validates a targeted feature surface instead of an exhaustive feature
+combination matrix. The supported check surface is the default feature set, each
+individual optional feature (`parallel`, `analysis-polars`, and
+`assertions-extended`), and the combined `--all-features` build.
+
 ## Module Surface (Reference)
 
 `anapao` exports:
@@ -386,9 +391,11 @@ What you learned:
 
 ```bash
 cargo test --doc
-cargo test
-cargo test --features parallel
-cargo test --features analysis-polars
+cargo test --all-targets
+cargo test --all-targets --features parallel
+cargo test --all-targets --features analysis-polars
+cargo test --all-targets --features assertions-extended
+cargo test --all-targets --all-features
 cargo audit
 cargo bench --no-run
 ```

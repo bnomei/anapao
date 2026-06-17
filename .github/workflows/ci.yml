@@ -94,3 +94,54 @@ jobs:
           cache-on-failure: true
       - name: Run tests (parallel feature)
         run: cargo test --all-targets --features parallel
+
+  test-analysis-polars:
+    name: Test Suite (analysis-polars feature)
+    needs: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-${{ runner.os }}-${{ runner.arch }}
+          save-if: ${{ github.event_name != 'pull_request' }}
+          cache-on-failure: true
+      - name: Run tests (analysis-polars feature)
+        run: cargo test --all-targets --features analysis-polars
+
+  test-assertions-extended:
+    name: Test Suite (assertions-extended feature)
+    needs: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-${{ runner.os }}-${{ runner.arch }}
+          save-if: ${{ github.event_name != 'pull_request' }}
+          cache-on-failure: true
+      - name: Run tests (assertions-extended feature)
+        run: cargo test --all-targets --features assertions-extended
+
+  test-all-features:
+    name: Test Suite (all features)
+    needs: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-${{ runner.os }}-${{ runner.arch }}
+          save-if: ${{ github.event_name != 'pull_request' }}
+          cache-on-failure: true
+      - name: Run tests (all features)
+        run: cargo test --all-targets --all-features
