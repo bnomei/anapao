@@ -360,6 +360,11 @@ What you learned:
 - `analysis-polars`: enables Polars DataFrame shaping helpers.
 - `assertions-extended`: enables extra assertion/snapshot/property helper crates.
 
+CI intentionally validates a targeted feature surface instead of an exhaustive feature
+combination matrix. The supported check surface is the default feature set, each
+individual optional feature (`parallel`, `analysis-polars`, and
+`assertions-extended`), and the combined `--all-features` build.
+
 ## Module Surface (Reference)
 
 `anapao` exports:
@@ -382,9 +387,11 @@ What you learned:
 
 ```bash
 cargo test --doc
-cargo test
-cargo test --features parallel
-cargo test --features analysis-polars
+cargo test --all-targets
+cargo test --all-targets --features parallel
+cargo test --all-targets --features analysis-polars
+cargo test --all-targets --features assertions-extended
+cargo test --all-targets --all-features
 cargo bench --no-run
 ```
 
