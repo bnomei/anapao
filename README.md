@@ -11,6 +11,8 @@
 `anapao` is a deterministic Rust testing utility for simulation and stochastic workflows.  
 This README is a linear tutorial for new users: you will build one scenario, run it deterministically, add expectations, run Monte Carlo batches, and persist CI-friendly artifacts.
 
+The README and generated crate documentation are self-contained public documentation. Any ignored local `docs/` directory is reserved for private research notes and is not tracked, packaged, shipped, or required to use the crate.
+
 ## What You Will Build
 
 By the end, you will have a repeatable testing flow that can:
