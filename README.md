@@ -8,7 +8,7 @@
 [![Discord](https://flat.badgen.net/badge/discord/bnomei?color=7289da&icon=discord&label)](https://discordapp.com/users/bnomei)
 [![Buymecoffee](https://flat.badgen.net/badge/icon/donate?icon=buymeacoffee&color=FF813F&label)](https://www.buymeacoffee.com/bnomei)
 
-`anapao` is a deterministic Rust testing utility for simulation and stochastic workflows.  
+`anapao` is a library-only deterministic Rust testing utility for simulation and stochastic workflows. It is intended to be used from Rust tests and tooling through the crate API, not as a command-line program.  
 This README is a linear tutorial for new users: you will build one scenario, run it deterministically, add expectations, run Monte Carlo batches, and persist CI-friendly artifacts.
 
 The README and generated crate documentation are self-contained public documentation. Any ignored local `docs/` directory is reserved for private research notes and is not tracked, packaged, shipped, or required to use the crate.
@@ -28,12 +28,14 @@ By the end, you will have a repeatable testing flow that can:
 - Cargo
 - A Rust test project where you want deterministic simulation checks
 
-Add the dependency:
+Add the library dependency:
 
 ```toml
 [dependencies]
 anapao = "0.1.0"
 ```
+
+The crate does not install or expose a binary target; import `anapao` from your Rust code.
 
 ---
 
