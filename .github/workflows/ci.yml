@@ -24,6 +24,24 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+  audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-${{ runner.os }}-${{ runner.arch }}
+          save-if: ${{ github.event_name != 'pull_request' }}
+          cache-on-failure: true
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Run dependency advisory audit
+        run: cargo audit
+
   clippy:
     name: Clippy Check
     needs: [fmt]

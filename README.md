@@ -385,6 +385,7 @@ cargo test --doc
 cargo test
 cargo test --features parallel
 cargo test --features analysis-polars
+cargo audit
 cargo bench --no-run
 ```
 
@@ -407,6 +408,17 @@ cargo bench --no-run
 ./benchmarks/run_profiles.sh
 BENCH_FEATURES=parallel ./benchmarks/run_profiles.sh
 ```
+
+## Dependency and Security Maintenance
+
+CI runs `cargo audit` on every push and pull request to report RustSec advisories and dependency problems from `Cargo.lock`. Treat a failing audit as a release blocker unless the advisory is not reachable for this crate; if an advisory is not actionable immediately, document the reason and the planned follow-up in the pull request.
+
+When updating dependencies:
+
+1. Prefer the smallest compatible version bump that resolves the advisory or maintenance need.
+2. Review changelogs for public API, MSRV, feature, and license changes before merging.
+3. Keep optional feature dependencies (`parallel`, `analysis-polars`, and `assertions-extended`) checked with the normal CI matrix instead of adding one-off release automation.
+4. Regenerate and commit `Cargo.lock`, then run `cargo audit` plus the standard repository validation commands.
 
 ## Local Pre-commit
 
