@@ -8,8 +8,10 @@
 [![Discord](https://flat.badgen.net/badge/discord/bnomei?color=7289da&icon=discord&label)](https://discordapp.com/users/bnomei)
 [![Buymecoffee](https://flat.badgen.net/badge/icon/donate?icon=buymeacoffee&color=FF813F&label)](https://www.buymeacoffee.com/bnomei)
 
-`anapao` is a deterministic Rust testing utility for simulation and stochastic workflows.  
+`anapao` is a library-only deterministic Rust testing utility for simulation and stochastic workflows. It is intended to be used from Rust tests and tooling through the crate API, not as a command-line program.
 This README is a linear tutorial for new users: you will build one scenario, run it deterministically, add expectations, run Monte Carlo batches, and persist CI-friendly artifacts.
+
+The README and generated crate documentation are self-contained public documentation. Any ignored local `docs/` directory is reserved for private research notes and is not tracked, packaged, shipped, or required to use the crate.
 
 ## What You Will Build
 
@@ -26,12 +28,14 @@ By the end, you will have a repeatable testing flow that can:
 - Cargo
 - A Rust test project where you want deterministic simulation checks
 
-Add the dependency:
+Add the library dependency:
 
 ```toml
 [dependencies]
 anapao = "0.1.0"
 ```
+
+The crate does not install or expose a binary target; import `anapao` from your Rust code.
 
 ---
 
@@ -360,6 +364,11 @@ What you learned:
 - `analysis-polars`: enables Polars DataFrame shaping helpers.
 - `assertions-extended`: enables extra assertion/snapshot/property helper crates.
 
+CI intentionally validates a targeted feature surface instead of an exhaustive feature
+combination matrix. The supported check surface is the default feature set, each
+individual optional feature (`parallel`, `analysis-polars`, and
+`assertions-extended`), and the combined `--all-features` build.
+
 ## Module Surface (Reference)
 
 `anapao` exports:
@@ -382,9 +391,12 @@ What you learned:
 
 ```bash
 cargo test --doc
-cargo test
-cargo test --features parallel
-cargo test --features analysis-polars
+cargo test --all-targets
+cargo test --all-targets --features parallel
+cargo test --all-targets --features analysis-polars
+cargo test --all-targets --features assertions-extended
+cargo test --all-targets --all-features
+cargo audit --deny warnings
 cargo bench --no-run
 ```
 
@@ -407,6 +419,17 @@ cargo bench --no-run
 ./benchmarks/run_profiles.sh
 BENCH_FEATURES=parallel ./benchmarks/run_profiles.sh
 ```
+
+## Dependency and Security Maintenance
+
+CI runs `cargo audit --deny warnings` on every push and pull request to report RustSec advisories and dependency problems from `Cargo.lock`. Treat a failing audit as a release blocker unless the advisory is not reachable for this crate; if an advisory is not actionable immediately, document the reason and the planned follow-up in the pull request.
+
+When updating dependencies:
+
+1. Prefer the smallest compatible version bump that resolves the advisory or maintenance need.
+2. Review changelogs for public API, MSRV, feature, and license changes before merging.
+3. Keep optional feature dependencies (`parallel`, `analysis-polars`, and `assertions-extended`) checked with the normal CI matrix instead of adding one-off release automation.
+4. Regenerate and commit `Cargo.lock`, then run `cargo audit --deny warnings` plus the standard repository validation commands.
 
 ## Local Pre-commit
 

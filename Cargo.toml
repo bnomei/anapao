@@ -4,14 +4,14 @@ version = "0.1.0"
 edition = "2021"
 license-file = "LICENSE"
 rust-version = "1.85"
-description = "Deterministic simulation testing utility for reproducible stochastic workflows"
+description = "Library for deterministic simulation tests and reproducible stochastic workflows"
 readme = "README.md"
 homepage = "https://github.com/bnomei/anapao"
 repository = "https://github.com/bnomei/anapao"
 documentation = "https://docs.rs/anapao"
 keywords = ["testing", "simulation", "deterministic", "stochastic", "monte-carlo"]
 categories = ["development-tools", "development-tools::testing"]
-exclude = [".DS_Store", "specs/**"]
+exclude = [".DS_Store", "specs/**", "scripts/package-release.*"]
 
 [features]
 default = []
