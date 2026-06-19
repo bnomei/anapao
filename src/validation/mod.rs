@@ -458,7 +458,9 @@ fn validate_state_connection_invariants(
         });
     }
 
-    validate_formula(format!("edges.{edge_id}.connection.state.formula"), formula)?;
+    if matches!(state.role, StateConnectionRole::Modifier) {
+        validate_formula(format!("edges.{edge_id}.connection.state.formula"), formula)?;
+    }
 
     if let Some(filter) = state.resource_filter.as_deref() {
         if filter.trim().is_empty() {
@@ -1487,6 +1489,37 @@ mod tests {
             }
             other => panic!("expected InvalidParameter, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn compile_scenario_accepts_trigger_state_star_formula() {
+        let trigger = crate::types::NodeId::fixture("trigger");
+        let actor = crate::types::NodeId::fixture("actor");
+
+        let state_edge = EdgeSpec::new(
+            crate::types::EdgeId::fixture("state-trigger"),
+            trigger.clone(),
+            actor.clone(),
+            TransferSpec::Remaining,
+        )
+        .with_connection(EdgeConnectionConfig {
+            kind: ConnectionKind::State,
+            resource: Default::default(),
+            state: StateConnectionConfig {
+                role: StateConnectionRole::Trigger,
+                formula: "*".to_string(),
+                target: StateConnectionTarget::Node,
+                target_connection: None,
+                resource_filter: None,
+            },
+        });
+
+        let spec = ScenarioSpec::new(ScenarioId::fixture("scenario"))
+            .with_node(NodeSpec::new(trigger, NodeKind::Source))
+            .with_node(NodeSpec::new(actor, NodeKind::Sink))
+            .with_edge(state_edge);
+
+        compile_scenario(&spec).expect("trigger star formula should compile");
     }
 
     #[test]

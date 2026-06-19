@@ -101,7 +101,10 @@ impl EngineExpressionCache {
                 cache.transfer_by_edge.insert(edge_id.clone(), compiled_expression);
             }
 
-            if matches!(edge.connection.kind, ConnectionKind::State) {
+            if matches!(edge.connection.kind, ConnectionKind::State)
+                && matches!(edge.connection.state.role, StateConnectionRole::Modifier)
+                && matches!(edge.connection.state.target, StateConnectionTarget::Node)
+            {
                 let compiled_expression =
                     runtime.compile(&edge.connection.state.formula).map_err(|error| {
                         formula_run_error(
@@ -2493,7 +2496,7 @@ mod tests {
                     resource: Default::default(),
                     state: StateConnectionConfig {
                         role: StateConnectionRole::Trigger,
-                        formula: "+1".to_string(),
+                        formula: "*".to_string(),
                         target: StateConnectionTarget::Node,
                         target_connection: None,
                         resource_filter: None,
