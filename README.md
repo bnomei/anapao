@@ -22,7 +22,7 @@ By the end, you will have a repeatable testing flow that can:
 
 ## Prerequisites
 
-- Rust `1.70+`
+- Rust `1.85+`
 - Cargo
 - A Rust test project where you want deterministic simulation checks
 

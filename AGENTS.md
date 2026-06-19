@@ -16,7 +16,7 @@
 - `./scripts/bench-criterion run --bench simulation` - standardized benchmark run; use `save`/`compare` for baseline regressions.
 
 ## Coding Style & Naming Conventions
-- Rust edition: 2021, MSRV: 1.70.
+- Rust edition: 2021, MSRV: 1.85.
 - Formatting: rustfmt with max width 100; use default 4-space indentation.
 - Naming: modules/files `snake_case`, types/traits `UpperCamelCase`, functions/vars `snake_case`, constants `UPPER_SNAKE_CASE`.
 - Keep public surface cohesive via module boundaries rather than large cross-module files.

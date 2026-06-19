@@ -508,7 +508,7 @@ mod tests {
 
     #[test]
     fn event_sink_error_wraps_io_serialization_and_custom_errors() {
-        let io_error = std::io::Error::new(std::io::ErrorKind::Other, "disk full");
+        let io_error = std::io::Error::other("disk full");
         let sink_error = EventSinkError::from(io_error);
         assert!(matches!(sink_error, EventSinkError::Io(_)));
 

@@ -3,7 +3,7 @@ name = "anapao"
 version = "0.1.0"
 edition = "2021"
 license-file = "LICENSE"
-rust-version = "1.70"
+rust-version = "1.85"
 description = "Deterministic simulation testing utility for reproducible stochastic workflows"
 readme = "README.md"
 homepage = "https://github.com/bnomei/anapao"
@@ -21,27 +21,26 @@ assertions-extended = ["dep:approx", "dep:assert-json-diff", "dep:insta", "dep:p
 
 [dependencies]
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = { version = "1.0.149", features = ["preserve_order"] }
+serde_json = { version = "1.0.150", features = ["preserve_order"] }
 thiserror = "2.0.18"
-itoa = "1.0.17"
-ryu = "1.0.22"
-memchr = "2.7.6"
-smallvec = "1.15.1"
-smol_str = "0.3.5"
-rand = "0.10.0"
+itoa = "1.0.18"
+ryu = "1.0.23"
+memchr = "2.8.2"
+smallvec = "1.15.2"
+rand = "0.10.1"
 rand_chacha = "0.10.0"
 rand_distr = "0.6.0"
-rayon = { version = "1.11.0", optional = true }
-polars = { version = "0.53.0", optional = true, default-features = false, features = ["fmt", "lazy"] }
+rayon = { version = "1.12.0", optional = true }
+polars = { version = "0.54.4", optional = true, default-features = false, features = ["fmt", "lazy"] }
 approx = { version = "0.5.1", optional = true }
 assert-json-diff = { version = "2.0.2", optional = true }
-insta = { version = "1.43.2", optional = true }
-proptest = { version = "1.9.0", optional = true }
+insta = { version = "1.48.0", optional = true }
+proptest = { version = "1.11.0", optional = true }
 
 [dev-dependencies]
-criterion = { version = "4.3.0", package = "codspeed-criterion-compat" }
+criterion = { version = "4.7.0", package = "codspeed-criterion-compat" }
 rstest = "0.26.1"
-tempfile = "3.23.0"
+tempfile = "3.27.0"
 
 [[bench]]
 name = "simulation"
