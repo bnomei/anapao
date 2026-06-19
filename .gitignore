@@ -26,6 +26,7 @@ target/*
 .cargo-home/
 
 docs/
+.frigg
 
 # Generated flamegraphs + derived CSV/JSON summaries
 benchmarks/profiles/
