@@ -7,7 +7,7 @@ use crate::events::{
     EventSink, EventSinkError, MetricSnapshotEvent, RunEvent, StepEndEvent, StepStartEvent,
     TransferEvent,
 };
-use crate::expr::{CompiledExpr, ExprRuntime};
+use crate::expr::{CompiledExpr, ExprError, ExprRuntime};
 use crate::rng::{rng_from_seed, BaseRng};
 use crate::stochastic::{
     sample_chance_percent, sample_closed_interval, sample_from_list, sample_from_matrix,
@@ -78,12 +78,12 @@ impl VariableRuntimeState {
 
 #[derive(Debug, Default)]
 struct EngineExpressionCache {
-    transfer_by_edge: BTreeMap<EdgeId, Option<CompiledExpr>>,
-    state_by_edge: BTreeMap<EdgeId, Option<CompiledExpr>>,
+    transfer_by_edge: BTreeMap<EdgeId, CompiledExpr>,
+    state_by_edge: BTreeMap<EdgeId, CompiledExpr>,
 }
 
 impl EngineExpressionCache {
-    fn from_compiled(compiled: &CompiledScenario, runtime: &ExprRuntime) -> Self {
+    fn from_compiled(compiled: &CompiledScenario, runtime: &ExprRuntime) -> Result<Self, RunError> {
         let mut cache = Self::default();
 
         for edge_id in &compiled.edge_order {
@@ -95,25 +95,33 @@ impl EngineExpressionCache {
             }
 
             if let TransferSpec::Expression { formula } = &edge.transfer {
-                cache.transfer_by_edge.insert(edge_id.clone(), runtime.compile(formula).ok());
+                let compiled_expression = runtime.compile(formula).map_err(|error| {
+                    formula_run_error(format!("edges.{edge_id}.transfer.expression.formula"), error)
+                })?;
+                cache.transfer_by_edge.insert(edge_id.clone(), compiled_expression);
             }
 
             if matches!(edge.connection.kind, ConnectionKind::State) {
-                cache
-                    .state_by_edge
-                    .insert(edge_id.clone(), runtime.compile(&edge.connection.state.formula).ok());
+                let compiled_expression =
+                    runtime.compile(&edge.connection.state.formula).map_err(|error| {
+                        formula_run_error(
+                            format!("edges.{edge_id}.connection.state.formula"),
+                            error,
+                        )
+                    })?;
+                cache.state_by_edge.insert(edge_id.clone(), compiled_expression);
             }
         }
 
-        cache
+        Ok(cache)
     }
 
     fn transfer_expression(&self, edge_id: &EdgeId) -> Option<&CompiledExpr> {
-        self.transfer_by_edge.get(edge_id).and_then(|compiled| compiled.as_ref())
+        self.transfer_by_edge.get(edge_id)
     }
 
     fn state_expression(&self, edge_id: &EdgeId) -> Option<&CompiledExpr> {
-        self.state_by_edge.get(edge_id).and_then(|compiled| compiled.as_ref())
+        self.state_by_edge.get(edge_id)
     }
 }
 
@@ -519,7 +527,7 @@ fn run_single_internal(
     let mut report = RunReport::new(compiled.scenario.id.clone(), config.seed);
     let mut state = init_state(compiled);
     let runtime = ExprRuntime::new();
-    let expression_cache = EngineExpressionCache::from_compiled(compiled, &runtime);
+    let expression_cache = EngineExpressionCache::from_compiled(compiled, &runtime)?;
     let step_plan = EngineStepPlan::from_compiled(compiled);
     let mut variables = VariableRuntimeState::from_compiled(compiled, config.seed);
     let mut gates = GateRuntimeState::from_seed(config.seed);
@@ -607,7 +615,7 @@ fn run_single_internal(
             &runtime,
             &expression_cache,
             variables.values(),
-        );
+        )?;
         state.step = attempted_step;
         refresh_metrics(compiled, &mut state);
         emit_metric_snapshots(run_id, state.step, &state.metrics, emit_event)?;
@@ -676,6 +684,10 @@ fn emit_metric_snapshots(
 
 fn map_event_sink_error(error: EventSinkError) -> RunError {
     RunError::EventSink { message: error.to_string() }
+}
+
+fn formula_run_error(name: String, error: ExprError) -> RunError {
+    RunError::InvalidRunConfig { name, reason: format!("formula evaluation failed: {error}") }
 }
 
 fn apply_source_generation(compiled: &CompiledScenario, state: &mut EngineState) {
@@ -859,7 +871,7 @@ fn apply_edge_transfers(
                         timeline,
                         step,
                         transfer_log,
-                    ),
+                    )?,
                     TransferControl::PullAll | TransferControl::PushAll => apply_all_edge_group(
                         compiled,
                         state,
@@ -870,7 +882,7 @@ fn apply_edge_transfers(
                         timeline,
                         step,
                         transfer_log,
-                    ),
+                    )?,
                 }
             };
 
@@ -909,7 +921,7 @@ fn apply_any_edge_group(
     timeline: &mut TimelineRuntimeState,
     step: u64,
     transfer_log: &mut Vec<TransferRecord>,
-) -> bool {
+) -> Result<bool, RunError> {
     let mut acted = false;
     for edge_id in edge_ids {
         let Some(edge) = compiled.scenario.edges.get(edge_id) else {
@@ -925,13 +937,14 @@ fn apply_any_edge_group(
             expression_cache,
             runtime_variables,
             from_available_override,
-        ) else {
+        )?
+        else {
             continue;
         };
         apply_transfer_plan(compiled, state, plan, timeline, step, transfer_log);
         acted = true;
     }
-    acted
+    Ok(acted)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -945,14 +958,14 @@ fn apply_all_edge_group(
     timeline: &mut TimelineRuntimeState,
     step: u64,
     transfer_log: &mut Vec<TransferRecord>,
-) -> bool {
+) -> Result<bool, RunError> {
     let mut plans = Vec::new();
     let mut total_requested_by_source = BTreeMap::<usize, f64>::new();
     let mut available_by_source = BTreeMap::<usize, f64>::new();
 
     for edge_id in edge_ids {
         let Some(edge) = compiled.scenario.edges.get(edge_id) else {
-            return false;
+            return Ok(false);
         };
         let from_available_override =
             timeline.transfer_available_for_source(compiled, state, &edge.from);
@@ -964,8 +977,9 @@ fn apply_all_edge_group(
             expression_cache,
             runtime_variables,
             from_available_override,
-        ) else {
-            return false;
+        )?
+        else {
+            return Ok(false);
         };
 
         let available = canonicalize_float(
@@ -986,7 +1000,7 @@ fn apply_all_edge_group(
             .copied()
             .unwrap_or_else(|| state.node_values.get(from_index).copied().unwrap_or(0.0).max(0.0));
         if canonicalize_float(available) + f64::EPSILON < requested_total {
-            return false;
+            return Ok(false);
         }
     }
 
@@ -994,7 +1008,7 @@ fn apply_all_edge_group(
         apply_transfer_plan(compiled, state, plan, timeline, step, transfer_log);
     }
 
-    true
+    Ok(true)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1067,7 +1081,7 @@ fn apply_gate_edge_group(
                     timeline,
                     step,
                     transfer_log,
-                ),
+                )?,
                 TransferControl::PullAll | TransferControl::PushAll => apply_all_edge_group(
                     compiled,
                     state,
@@ -1078,7 +1092,7 @@ fn apply_gate_edge_group(
                     timeline,
                     step,
                     transfer_log,
-                ),
+                )?,
             });
         }
     };
@@ -1183,7 +1197,8 @@ fn gate_routing_for_group(
             runtime,
             expression_cache,
             runtime_variables,
-        ) else {
+        )?
+        else {
             return Ok(None);
         };
         if weight <= 0.0 {
@@ -1241,21 +1256,23 @@ fn gate_weight_for_edge(
     runtime: &ExprRuntime,
     expression_cache: &EngineExpressionCache,
     runtime_variables: &BTreeMap<String, f64>,
-) -> Option<(GateWeightKind, f64)> {
+) -> Result<Option<(GateWeightKind, f64)>, RunError> {
     match &edge.transfer {
         TransferSpec::Fixed { amount } => {
-            amount.is_finite().then_some((GateWeightKind::Ratio, canonicalize_float(*amount)))
+            Ok(amount.is_finite().then_some((GateWeightKind::Ratio, canonicalize_float(*amount))))
         }
         TransferSpec::Fraction { numerator, denominator } => {
             if *denominator == 0 || *numerator == 0 {
-                return None;
+                return Ok(None);
             }
             let weight = *numerator as f64 / *denominator as f64 * 100.0;
-            weight.is_finite().then_some((GateWeightKind::Percentage, canonicalize_float(weight)))
+            Ok(weight
+                .is_finite()
+                .then_some((GateWeightKind::Percentage, canonicalize_float(weight))))
         }
         TransferSpec::MetricScaled { metric, factor } => {
             let weight = metric_value(compiled, state, metric) * *factor;
-            weight.is_finite().then_some((GateWeightKind::Chance, canonicalize_float(weight)))
+            Ok(weight.is_finite().then_some((GateWeightKind::Chance, canonicalize_float(weight))))
         }
         TransferSpec::Expression { .. } => {
             let from_value = node_value(compiled, state, &edge.from);
@@ -1267,10 +1284,12 @@ fn gate_weight_for_edge(
                 runtime,
                 expression_cache,
                 runtime_variables,
-            );
-            requested.is_finite().then_some((GateWeightKind::Chance, canonicalize_float(requested)))
+            )?;
+            Ok(requested
+                .is_finite()
+                .then_some((GateWeightKind::Chance, canonicalize_float(requested))))
         }
-        TransferSpec::Remaining => Some((GateWeightKind::Chance, 100.0)),
+        TransferSpec::Remaining => Ok(Some((GateWeightKind::Chance, 100.0))),
     }
 }
 
@@ -1282,11 +1301,15 @@ fn plan_edge_transfer_any(
     expression_cache: &EngineExpressionCache,
     runtime_variables: &BTreeMap<String, f64>,
     from_value_override: Option<f64>,
-) -> Option<EdgeTransferPlan> {
-    let from_index = *compiled.node_index_by_id.get(&edge.from)?;
-    let to_index = *compiled.node_index_by_id.get(&edge.to)?;
+) -> Result<Option<EdgeTransferPlan>, RunError> {
+    let Some(&from_index) = compiled.node_index_by_id.get(&edge.from) else {
+        return Ok(None);
+    };
+    let Some(&to_index) = compiled.node_index_by_id.get(&edge.to) else {
+        return Ok(None);
+    };
     if from_index == to_index {
-        return None;
+        return Ok(None);
     }
 
     let from_value = canonicalize_float(
@@ -1302,14 +1325,14 @@ fn plan_edge_transfer_any(
         runtime,
         expression_cache,
         runtime_variables,
-    );
+    )?;
     let transfer =
         clamp_transfer_amount(edge.connection.resource.token_size, from_value, requested);
     if transfer <= 0.0 {
-        return None;
+        return Ok(None);
     }
 
-    Some(EdgeTransferPlan {
+    Ok(Some(EdgeTransferPlan {
         edge_id: edge.id.clone(),
         from_node_id: edge.from.clone(),
         to_node_id: edge.to.clone(),
@@ -1317,7 +1340,7 @@ fn plan_edge_transfer_any(
         to_index,
         requested,
         transfer,
-    })
+    }))
 }
 
 fn plan_edge_transfer_all(
@@ -1328,11 +1351,15 @@ fn plan_edge_transfer_all(
     expression_cache: &EngineExpressionCache,
     runtime_variables: &BTreeMap<String, f64>,
     from_value_override: Option<f64>,
-) -> Option<EdgeTransferPlan> {
-    let from_index = *compiled.node_index_by_id.get(&edge.from)?;
-    let to_index = *compiled.node_index_by_id.get(&edge.to)?;
+) -> Result<Option<EdgeTransferPlan>, RunError> {
+    let Some(&from_index) = compiled.node_index_by_id.get(&edge.from) else {
+        return Ok(None);
+    };
+    let Some(&to_index) = compiled.node_index_by_id.get(&edge.to) else {
+        return Ok(None);
+    };
     if from_index == to_index {
-        return None;
+        return Ok(None);
     }
 
     let from_value = canonicalize_float(
@@ -1348,13 +1375,13 @@ fn plan_edge_transfer_all(
         runtime,
         expression_cache,
         runtime_variables,
-    );
+    )?;
     let transfer = quantize_requested_amount(edge.connection.resource.token_size, requested);
     if transfer <= 0.0 {
-        return None;
+        return Ok(None);
     }
 
-    Some(EdgeTransferPlan {
+    Ok(Some(EdgeTransferPlan {
         edge_id: edge.id.clone(),
         from_node_id: edge.from.clone(),
         to_node_id: edge.to.clone(),
@@ -1362,7 +1389,7 @@ fn plan_edge_transfer_all(
         to_index,
         requested,
         transfer,
-    })
+    }))
 }
 
 fn apply_transfer_plan(
@@ -1563,7 +1590,7 @@ fn apply_state_connections(
     runtime: &ExprRuntime,
     expression_cache: &EngineExpressionCache,
     runtime_variables: &BTreeMap<String, f64>,
-) {
+) -> Result<(), RunError> {
     let mut next_step_node_deltas = vec![0.0; state.node_values.len()];
 
     for edge_id in &compiled.edge_order {
@@ -1605,7 +1632,8 @@ fn apply_state_connections(
             runtime,
             expression_cache,
             runtime_variables,
-        ) else {
+        )?
+        else {
             continue;
         };
 
@@ -1627,6 +1655,8 @@ fn apply_state_connections(
             *value = canonicalize_float(*value + delta);
         }
     }
+
+    Ok(())
 }
 
 fn transfer_request(
@@ -1637,7 +1667,7 @@ fn transfer_request(
     runtime: &ExprRuntime,
     expression_cache: &EngineExpressionCache,
     runtime_variables: &BTreeMap<String, f64>,
-) -> f64 {
+) -> Result<f64, RunError> {
     let requested = match &edge.transfer {
         TransferSpec::Fixed { amount } => *amount,
         TransferSpec::Fraction { numerator, denominator } => {
@@ -1653,7 +1683,10 @@ fn transfer_request(
         }
         TransferSpec::Expression { .. } => {
             let Some(compiled_expression) = expression_cache.transfer_expression(&edge.id) else {
-                return 0.0;
+                return Err(RunError::InvalidRunConfig {
+                    name: format!("edges.{}.transfer.expression.formula", edge.id),
+                    reason: "expression was not compiled".to_string(),
+                });
             };
 
             let step = state.step as f64;
@@ -1669,6 +1702,7 @@ fn transfer_request(
                 runtime,
                 compiled_expression,
                 runtime_variables,
+                format!("edges.{}.transfer.expression.formula", edge.id),
                 &FormulaBindings {
                     step: canonicalize_float(step),
                     total: canonicalize_float(total),
@@ -1682,12 +1716,11 @@ fn transfer_request(
                     available: Some(canonicalize_float(from_value.max(0.0))),
                     s: None,
                 },
-            )
-            .unwrap_or(0.0)
+            )?
         }
     };
 
-    canonicalize_float(requested)
+    Ok(canonicalize_float(requested))
 }
 
 fn clamp_transfer_amount(token_size: u64, from_value: f64, requested: f64) -> f64 {
@@ -1737,14 +1770,15 @@ fn evaluate_compiled_formula(
     runtime: &ExprRuntime,
     expression: &CompiledExpr,
     runtime_variables: &BTreeMap<String, f64>,
+    name: String,
     bindings: &FormulaBindings,
-) -> Option<f64> {
+) -> Result<f64, RunError> {
     let value = runtime
         .evaluate_compiled_with_resolver(expression, |name| {
             resolve_formula_variable(name, bindings, runtime_variables)
         })
-        .ok()?;
-    Some(canonicalize_float(value))
+        .map_err(|error| formula_run_error(name, error))?;
+    Ok(canonicalize_float(value))
 }
 
 fn resolve_formula_variable(
@@ -1778,8 +1812,13 @@ fn evaluate_state_formula_delta(
     runtime: &ExprRuntime,
     expression_cache: &EngineExpressionCache,
     runtime_variables: &BTreeMap<String, f64>,
-) -> Option<f64> {
-    let compiled_expression = expression_cache.state_expression(edge_id)?;
+) -> Result<Option<f64>, RunError> {
+    let Some(compiled_expression) = expression_cache.state_expression(edge_id) else {
+        return Err(RunError::InvalidRunConfig {
+            name: format!("edges.{edge_id}.connection.state.formula"),
+            reason: "expression was not compiled".to_string(),
+        });
+    };
     let step = state.step as f64;
     let total = total_node_value(state);
 
@@ -1787,6 +1826,7 @@ fn evaluate_state_formula_delta(
         runtime,
         compiled_expression,
         runtime_variables,
+        format!("edges.{edge_id}.connection.state.formula"),
         &FormulaBindings {
             step: canonicalize_float(step),
             total: canonicalize_float(total),
@@ -1801,6 +1841,7 @@ fn evaluate_state_formula_delta(
             s: Some(canonicalize_float(source_state)),
         },
     )
+    .map(Some)
 }
 
 fn refresh_metrics(compiled: &CompiledScenario, state: &mut EngineState) {
@@ -1985,6 +2026,7 @@ fn to_scaled_i64(value: f64) -> i64 {
 mod tests {
     use std::collections::BTreeMap;
 
+    use crate::error::RunError;
     use crate::rng::rng_from_seed;
     use crate::stochastic::{sample_closed_interval, sample_from_list, sample_from_matrix};
     use crate::types::{
@@ -2142,6 +2184,36 @@ mod tests {
         assert_eq!(report_a, report_b);
         assert_eq!(report_a.final_node_values.get(&source), Some(&0.0));
         assert_eq!(report_a.final_node_values.get(&sink), Some(&5.0));
+    }
+
+    #[test]
+    fn run_single_transfer_expression_unknown_variable_returns_error() {
+        let source = NodeId::fixture("source");
+        let sink = NodeId::fixture("sink");
+
+        let mut scenario =
+            ScenarioSpec::new(ScenarioId::fixture("scenario-transfer-expression-error"))
+                .with_node(NodeSpec::new(source.clone(), NodeKind::Process).with_initial_value(5.0))
+                .with_node(NodeSpec::new(sink.clone(), NodeKind::Sink))
+                .with_edge(EdgeSpec::new(
+                    EdgeId::fixture("edge"),
+                    source,
+                    sink,
+                    TransferSpec::Expression { formula: "missing + 1".to_string() },
+                ));
+        scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 1 }];
+
+        let compiled = compile_scenario(&scenario).expect("scenario should compile");
+        let config = RunConfig { seed: 8, max_steps: 10, capture: CaptureConfig::disabled() };
+        let error = run_single(&compiled, &config).expect_err("unknown variable must fail");
+
+        match error {
+            RunError::InvalidRunConfig { name, reason } => {
+                assert_eq!(name, "edges.edge.transfer.expression.formula");
+                assert!(reason.contains("unknown variable `missing`"));
+            }
+            other => panic!("expected InvalidRunConfig, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2308,6 +2380,49 @@ mod tests {
         assert_eq!(report_a.final_node_values.get(&source), Some(&2.0));
         assert_eq!(report_a.final_node_values.get(&sink), Some(&4.0));
         assert_eq!(report_a.steps_executed, 2);
+    }
+
+    #[test]
+    fn run_single_state_modifier_unknown_variable_returns_error() {
+        let source = NodeId::fixture("source");
+        let sink = NodeId::fixture("sink");
+
+        let mut scenario =
+            ScenarioSpec::new(ScenarioId::fixture("scenario-state-expression-error"))
+                .with_node(NodeSpec::new(source.clone(), NodeKind::Process).with_initial_value(2.0))
+                .with_node(NodeSpec::new(sink.clone(), NodeKind::Sink))
+                .with_edge(
+                    EdgeSpec::new(
+                        EdgeId::fixture("state-edge"),
+                        source,
+                        sink,
+                        TransferSpec::Remaining,
+                    )
+                    .with_connection(EdgeConnectionConfig {
+                        kind: ConnectionKind::State,
+                        resource: Default::default(),
+                        state: StateConnectionConfig {
+                            role: StateConnectionRole::Modifier,
+                            formula: "+missing".to_string(),
+                            target: StateConnectionTarget::Node,
+                            target_connection: None,
+                            resource_filter: None,
+                        },
+                    }),
+                );
+        scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 1 }];
+
+        let compiled = compile_scenario(&scenario).expect("scenario should compile");
+        let config = RunConfig { seed: 7, max_steps: 5, capture: CaptureConfig::disabled() };
+        let error = run_single(&compiled, &config).expect_err("unknown variable must fail");
+
+        match error {
+            RunError::InvalidRunConfig { name, reason } => {
+                assert_eq!(name, "edges.state-edge.connection.state.formula");
+                assert!(reason.contains("unknown variable `missing`"));
+            }
+            other => panic!("expected InvalidRunConfig, got {other:?}"),
+        }
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::error::SetupError;
+use crate::expr::ExprRuntime;
 use crate::types::{
     BatchConfig, BatchRunTemplate, ConnectionKind, DelayNodeConfig, EdgeId, EdgeSpec,
     EndConditionSpec, MetricKey, NodeConfig, NodeId, NodeKind, NodeSpec, QueueNodeConfig,
@@ -402,13 +403,28 @@ fn validate_resource_connection_invariants(
         });
     }
 
-    if let TransferSpec::Fixed { amount } = &edge.transfer {
-        if !amount.is_finite() || *amount <= 0.0 || !is_whole_number(*amount) {
-            return Err(SetupError::InvalidParameter {
-                name: format!("edges.{edge_id}.transfer.fixed.amount"),
-                reason: "resource transfers must use positive integer token quantities".to_string(),
-            });
+    match &edge.transfer {
+        TransferSpec::Fixed { amount } => {
+            if !amount.is_finite() || *amount <= 0.0 || !is_whole_number(*amount) {
+                return Err(SetupError::InvalidParameter {
+                    name: format!("edges.{edge_id}.transfer.fixed.amount"),
+                    reason: "resource transfers must use positive integer token quantities"
+                        .to_string(),
+                });
+            }
         }
+        TransferSpec::Fraction { denominator, .. } => {
+            if *denominator == 0 {
+                return Err(SetupError::InvalidParameter {
+                    name: format!("edges.{edge_id}.transfer.fraction.denominator"),
+                    reason: "must be greater than 0".to_string(),
+                });
+            }
+        }
+        TransferSpec::Expression { formula } => {
+            validate_formula(format!("edges.{edge_id}.transfer.expression.formula"), formula)?
+        }
+        TransferSpec::MetricScaled { .. } | TransferSpec::Remaining => {}
     }
 
     Ok(())
@@ -441,6 +457,8 @@ fn validate_state_connection_invariants(
             reason: "modifier formulas must start with `+` or `-`".to_string(),
         });
     }
+
+    validate_formula(format!("edges.{edge_id}.connection.state.formula"), formula)?;
 
     if let Some(filter) = state.resource_filter.as_deref() {
         if filter.trim().is_empty() {
@@ -541,12 +559,26 @@ fn formula_has_explicit_sign(formula: &str) -> bool {
     matches!(formula.chars().next(), Some('+') | Some('-'))
 }
 
+fn validate_formula(name: String, formula: &str) -> Result<(), SetupError> {
+    ExprRuntime::new().compile(formula).map(|_| ()).map_err(|error| SetupError::InvalidParameter {
+        name,
+        reason: format!("invalid expression: {error}"),
+    })
+}
+
 fn is_whole_number(value: f64) -> bool {
     (value.fract()).abs() <= f64::EPSILON
 }
 
 fn validate_node_invariants(spec: &ScenarioSpec) -> Result<(), SetupError> {
     for (node_id, node) in &spec.nodes {
+        if !node.initial_value.is_finite() {
+            return Err(SetupError::InvalidParameter {
+                name: format!("nodes.{node_id}.initial_value"),
+                reason: "must be finite".to_string(),
+            });
+        }
+
         match node.kind {
             NodeKind::Pool => validate_pool_constraints(node_id, node)?,
             NodeKind::Converter | NodeKind::Trader => {
@@ -1100,6 +1132,56 @@ mod tests {
     }
 
     #[test]
+    fn compile_scenario_rejects_fraction_transfer_zero_denominator() {
+        let source = crate::types::NodeId::fixture("source");
+        let sink = crate::types::NodeId::fixture("sink");
+
+        let spec = ScenarioSpec::new(ScenarioId::fixture("scenario"))
+            .with_node(NodeSpec::new(source.clone(), NodeKind::Source))
+            .with_node(NodeSpec::new(sink.clone(), NodeKind::Sink))
+            .with_edge(EdgeSpec::new(
+                crate::types::EdgeId::fixture("edge-1"),
+                source,
+                sink,
+                TransferSpec::Fraction { numerator: 1, denominator: 0 },
+            ));
+
+        let error = compile_scenario(&spec).expect_err("zero denominator must fail");
+        match error {
+            SetupError::InvalidParameter { name, reason } => {
+                assert_eq!(name, "edges.edge-1.transfer.fraction.denominator");
+                assert_eq!(reason, "must be greater than 0");
+            }
+            other => panic!("expected InvalidParameter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compile_scenario_rejects_invalid_transfer_expression_formula() {
+        let source = crate::types::NodeId::fixture("source");
+        let sink = crate::types::NodeId::fixture("sink");
+
+        let spec = ScenarioSpec::new(ScenarioId::fixture("scenario"))
+            .with_node(NodeSpec::new(source.clone(), NodeKind::Source))
+            .with_node(NodeSpec::new(sink.clone(), NodeKind::Sink))
+            .with_edge(EdgeSpec::new(
+                crate::types::EdgeId::fixture("edge-1"),
+                source,
+                sink,
+                TransferSpec::Expression { formula: "@ + 1".to_string() },
+            ));
+
+        let error = compile_scenario(&spec).expect_err("invalid expression must fail");
+        match error {
+            SetupError::InvalidParameter { name, reason } => {
+                assert_eq!(name, "edges.edge-1.transfer.expression.formula");
+                assert!(reason.contains("unexpected token `@` at byte 0"));
+            }
+            other => panic!("expected InvalidParameter, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn compile_scenario_rejects_negative_pool_start_by_default() {
         let spec = ScenarioSpec::new(ScenarioId::fixture("scenario")).with_node(
             NodeSpec::new(crate::types::NodeId::fixture("pool"), NodeKind::Pool)
@@ -1114,6 +1196,23 @@ mod tests {
                     reason,
                     "must be non-negative unless config.allow_negative_start is true"
                 );
+            }
+            other => panic!("expected InvalidParameter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compile_scenario_rejects_non_finite_node_initial_value() {
+        let spec = ScenarioSpec::new(ScenarioId::fixture("scenario")).with_node(
+            NodeSpec::new(crate::types::NodeId::fixture("source"), NodeKind::Source)
+                .with_initial_value(f64::NAN),
+        );
+
+        let error = compile_scenario(&spec).expect_err("non-finite initial value must fail");
+        match error {
+            SetupError::InvalidParameter { name, reason } => {
+                assert_eq!(name, "nodes.source.initial_value");
+                assert_eq!(reason, "must be finite");
             }
             other => panic!("expected InvalidParameter, got {other:?}"),
         }
@@ -1347,6 +1446,44 @@ mod tests {
             SetupError::InvalidParameter { name, reason } => {
                 assert_eq!(name, "edges.state-edge.connection.state.formula");
                 assert_eq!(reason, "modifier formulas must start with `+` or `-`");
+            }
+            other => panic!("expected InvalidParameter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compile_scenario_rejects_invalid_state_connection_formula() {
+        let source = crate::types::NodeId::fixture("source");
+        let sink = crate::types::NodeId::fixture("sink");
+
+        let state_edge = EdgeSpec::new(
+            crate::types::EdgeId::fixture("state-edge"),
+            source.clone(),
+            sink.clone(),
+            TransferSpec::Remaining,
+        )
+        .with_connection(EdgeConnectionConfig {
+            kind: ConnectionKind::State,
+            resource: Default::default(),
+            state: StateConnectionConfig {
+                role: StateConnectionRole::Modifier,
+                formula: "+ @".to_string(),
+                target: StateConnectionTarget::Node,
+                target_connection: None,
+                resource_filter: None,
+            },
+        });
+
+        let spec = ScenarioSpec::new(ScenarioId::fixture("scenario"))
+            .with_node(NodeSpec::new(source, NodeKind::Source))
+            .with_node(NodeSpec::new(sink, NodeKind::Sink))
+            .with_edge(state_edge);
+
+        let error = compile_scenario(&spec).expect_err("invalid state formula must fail");
+        match error {
+            SetupError::InvalidParameter { name, reason } => {
+                assert_eq!(name, "edges.state-edge.connection.state.formula");
+                assert!(reason.contains("unexpected token `@` at byte 2"));
             }
             other => panic!("expected InvalidParameter, got {other:?}"),
         }

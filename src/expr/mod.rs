@@ -60,7 +60,7 @@ impl ExprRuntime {
             return Err(ExprError::Empty);
         }
 
-        let ast = Parser::new(trimmed).parse()?;
+        let ast = Parser::new(trimmed)?.parse()?;
         Ok(CompiledExpr { ast })
     }
 
@@ -371,11 +371,10 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    fn new(input: &'a str) -> Self {
+    fn new(input: &'a str) -> Result<Self, ExprError> {
         let mut lexer = Lexer::new(input);
-        let current =
-            lexer.next_token().expect("lexer cannot fail before first token for static input");
-        Self { lexer, current }
+        let current = lexer.next_token()?;
+        Ok(Self { lexer, current })
     }
 
     fn parse(mut self) -> Result<Expr, ExprError> {
@@ -850,6 +849,15 @@ mod tests {
         let err = runtime.evaluate("1 + )", &BTreeMap::new()).expect_err("parse must fail");
         assert!(
             matches!(err, ExprError::UnexpectedToken { token, position } if token == ")" && position == 4)
+        );
+    }
+
+    #[test]
+    fn evaluate_reports_invalid_first_token_without_panicking() {
+        let runtime = ExprRuntime::new();
+        let err = runtime.evaluate("@ + 1", &BTreeMap::new()).expect_err("parse must fail");
+        assert!(
+            matches!(err, ExprError::UnexpectedToken { token, position } if token == "@" && position == 0)
         );
     }
 

@@ -703,22 +703,41 @@ fn check_prb013(case: &ParityFixtureCase) {
 
 fn check_prb014(case: &ParityFixtureCase) {
     let upper = run_variable_case_scenario("Roll", case, "exact-case variable scenario should run");
-    let lower =
-        run_variable_case_scenario("roll", case, "mismatched-case variable scenario should run");
 
     let upper_sink =
         upper.final_node_values.get(&NodeId::fixture("sink")).copied().unwrap_or(f64::NAN);
-    let lower_sink =
-        lower.final_node_values.get(&NodeId::fixture("sink")).copied().unwrap_or(f64::NAN);
-    if upper_sink != 2.0 || lower_sink != 0.0 {
+    if upper_sink != 2.0 {
         fail(
             case,
-            "variable lookup is not case-sensitive",
-            evidence(vec![
-                ("upper_case_sink", upper_sink.to_string()),
-                ("lower_case_sink", lower_sink.to_string()),
-            ]),
+            "exact-case variable lookup did not transfer the configured value",
+            evidence(vec![("upper_case_sink", upper_sink.to_string())]),
         );
+    }
+
+    let lower = compile_variable_case_scenario("roll", case);
+    let lower_error = run_error(
+        case,
+        &lower,
+        &run_config(2614, 4),
+        "mismatched-case variable scenario must fail",
+    );
+    match lower_error {
+        RunError::InvalidRunConfig { name, reason } => {
+            if name != "edges.edge.transfer.expression.formula"
+                || !reason.contains("unknown variable `roll`")
+            {
+                fail(
+                    case,
+                    "mismatched-case variable failure shape mismatch",
+                    evidence(vec![("name", name), ("reason", reason)]),
+                );
+            }
+        }
+        other => fail(
+            case,
+            "unexpected run error type for mismatched-case variable lookup",
+            evidence(vec![("error", other.to_string())]),
+        ),
     }
 }
 
@@ -803,6 +822,11 @@ fn run_variable_case_scenario(
     case: &ParityFixtureCase,
     context: &str,
 ) -> anapao::types::RunReport {
+    let compiled = compile_variable_case_scenario(expression, case);
+    run_ok(case, &compiled, &run_config(2614, 4), context)
+}
+
+fn compile_variable_case_scenario(expression: &str, case: &ParityFixtureCase) -> CompiledScenario {
     let source = NodeId::fixture("source");
     let sink = NodeId::fixture("sink");
 
@@ -825,8 +849,7 @@ fn run_variable_case_scenario(
     };
     scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 1 }];
 
-    let compiled = compile_ok(case, &scenario, "variable case-sensitivity scenario should compile");
-    run_ok(case, &compiled, &run_config(2614, 4), context)
+    compile_ok(case, &scenario, "variable case-sensitivity scenario should compile")
 }
 
 fn run_config(seed: u64, max_steps: u64) -> RunConfig {
