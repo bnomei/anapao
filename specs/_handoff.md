@@ -1,9 +1,10 @@
 # Program handoff
 
-Last updated: 2026-02-24T18:05:00Z
+Last updated: 2026-06-19T12:18:24Z
 
 ## Current focus
-- Program reopened for coverage hardening: specs 029-032 drafted and ready for implementation dispatch.
+- Coverage hardening specs 029-032 and perf hardening specs 033-036 are complete.
+- No active implementation focus is reserved in the ledger.
 - Execution mode: adaptive (cap: 3, bundle depth: 2)
 
 ## Reservations (in progress scopes)
@@ -16,12 +17,9 @@ Last updated: 2026-02-24T18:05:00Z
 - None
 
 ## Next ready tasks
-- 029-compile-reference-validation / T001
-- 031-pikmin-fixture-refactor / T001
-- 030-live-event-streaming / T001 (after or in parallel with 029 where feasible)
-- 032-event-order-contract-hardening / T001 (after 030)
+- None
 
 ## Notes
-- docs/machinations.md is the normative source for parity specs.
 - Keep deterministic/reproducible guarantees unchanged.
-- Prefer fixture-first semantic verification for each added rule.
+- Prefer fixture-first semantic verification for future parity rules.
+- If new work is added, update `specs/index.md` and the affected `tasks.md` before dispatch.

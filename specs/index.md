@@ -39,11 +39,17 @@ Bundle depth: 2 (same write scope only)
 - 027-artifact-schema-v2 <- 011-artifact-writer, 024-accuracy-indicator, 025-debugger-and-history
 - 028-perf-and-determinism-hardening <- 020-gate-routing-engine, 021-delay-queue-timeline, 024-accuracy-indicator, 027-artifact-schema-v2
 
-### Coverage Hardening (planned)
+### Coverage Hardening (completed)
 - 029-compile-reference-validation <- 005-setup-validation, 006-step-engine
 - 030-live-event-streaming <- 006-step-engine, 008-events-contract, 012-assertion-engine
 - 031-pikmin-fixture-refactor <- 013-rstest-testkit, 006-step-engine
 - 032-event-order-contract-hardening <- 008-events-contract, 030-live-event-streaming
+
+### Performance Hardening (completed)
+- 033-perf-matrix-and-baseline-ops <- 015-perf-guardrails, 028-perf-and-determinism-hardening
+- 034-perf-expression-fast-path <- 033-perf-matrix-and-baseline-ops, 022-expression-runtime
+- 035-perf-gate-routing-and-batch <- 033-perf-matrix-and-baseline-ops, 034-perf-expression-fast-path, 020-gate-routing-engine, 009-monte-carlo-runner
+- 036-perf-artifact-writer-throughput <- 033-perf-matrix-and-baseline-ops, 011-artifact-writer
 
 ## Wave plan
 
@@ -63,7 +69,11 @@ Bundle depth: 2 (same write scope only)
 - Wave K: 026 and 027 (completed)
 - Wave L: 028 (completed)
 
-### Coverage hardening waves (planned)
-- Wave M (parallel): 029, 031
-- Wave N: 030
-- Wave O: 032
+### Coverage hardening waves
+- Wave M (parallel): 029, 031 (completed)
+- Wave N: 030 (completed)
+- Wave O: 032 (completed)
+
+### Performance hardening waves
+- Wave P: 033 (completed)
+- Wave Q: 034 -> 035 and 036 (completed)
