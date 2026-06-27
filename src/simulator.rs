@@ -177,7 +177,12 @@ impl Simulator {
 
         if let Some(sink) = sink {
             emit_batch_events(sink, &report)?;
-            emit_assertion_checkpoints(sink, "batch", 0, &assertion_report)
+            // Batch-level assertion checkpoints are emitted after every per-run
+            // event. The raw sink stream must stay monotonic by `RunEventOrder`
+            // (spec 032), which orders by `run_id` lexicographically, so the
+            // checkpoint run_id must sort after all `run-{index}` ids. "run-batch"
+            // does: 'b' is greater than any digit, so it follows every numbered run.
+            emit_assertion_checkpoints(sink, "run-batch", 0, &assertion_report)
                 .map_err(map_sink_error)?;
             sink.flush().map_err(map_sink_error)?;
         }
@@ -473,6 +478,38 @@ mod tests {
         let names = sink.events().iter().map(|event| event.event_name()).collect::<Vec<_>>();
         assert!(names.contains(&"metric_snapshot"));
         assert!(names.contains(&"assertion_checkpoint"));
+    }
+
+    #[test]
+    fn simulator_run_batch_with_assertions_emits_monotonic_raw_stream() {
+        // The "batch" assertion checkpoints are emitted after every per-run event,
+        // so the raw sink stream must already be monotonic by event order without
+        // pre-sorting (spec 032).
+        let compiled = fixture_compiled_scenario().expect("compiled fixture");
+        let mut sink = VecEventSink::new();
+        let expectations = vec![Expectation::Between {
+            metric: MetricKey::fixture("sink"),
+            selector: MetricSelector::Final,
+            min: 1.0,
+            max: 3.0,
+        }];
+
+        let (_report, _assertion_report) = Simulator::run_batch_with_assertions_and_sink(
+            &compiled,
+            &deterministic_batch_config(),
+            &expectations,
+            &mut sink,
+        )
+        .expect("batch with assertions should succeed");
+
+        let events = sink.events();
+        assert!(events.iter().any(|event| {
+            matches!(event.order().phase, RunEventPhase::AssertionCheckpoint)
+        }));
+        assert!(
+            events.windows(2).all(|pair| pair[0].order() <= pair[1].order()),
+            "raw batch+assertion sink order must already be monotonic"
+        );
     }
 
     #[test]

@@ -1,5 +1,5 @@
 DEVANA-FINDING: v1
-Priority: P1 | Confidence: high | Security-sensitive: no | Status: open
+Priority: P1 | Confidence: high | Security-sensitive: no | Status: fixed
 Location: src/simulator.rs:180 | Slug: batch-assertion-breaks-event-monotonicity
 
 # Batch assertion checkpoints break raw event-stream monotonicity
@@ -45,6 +45,7 @@ After working this report, preserve the original finding body. Update line 2 `St
 ## Status Notes
 
 - 2026-06-25: open by Devana. Initial report written from static source inspection.
+- 2026-06-27: fixed. Confirmed via new test that `run_batch_with_assertions_and_sink` emitted per-run events then `"batch"` checkpoints, and the raw stream was non-monotonic. IMPORTANT correction to the report's suggested fix: the raw-stream monotonicity contract (`pair[0].order() <= pair[1].order()`, spec 032 / tests/pikmin_diagram.rs:178) uses `RunEventOrder`'s *derived* `Ord`, which compares `run_id` lexicographically — NOT `compare_run_id`. So option 3 (extend `compare_run_id`) does not fix the raw stream; verified by experiment (the inversion `run-5 StepEnd` → `batch AssertionCheckpoint` persisted after a `compare_run_id` change). Applied option 1 instead: emit batch checkpoints under run_id `"run-batch"`. Because `'b'` (0x62) is greater than every ASCII digit, `"run-batch"` sorts lexicographically after every `"run-{index}"`, satisfying both the derived `Ord` raw-stream check and the `compare_run_id` sort path (parse fails → string compare, same result). Added regression test `simulator_run_batch_with_assertions_emits_monotonic_raw_stream` (6-run batch, asserts raw `order()` is non-decreasing and a checkpoint phase is present). Full `cargo test` green. NOTE (out of scope, not fixed): batches with >= 10 runs would already break the lexicographic raw-stream contract between `run-9` and `run-10`; left for a separate report.
 
 DEVANA-KEY: src/simulator.rs:180 | P1 | batch-assertion-breaks-event-monotonicity
-DEVANA-SUMMARY: Status=open | P1 high src/simulator.rs:180 - Batch assertion checkpoints use run_id "batch" that sorts before run-* ids, breaking raw stream monotonicity.
+DEVANA-SUMMARY: Status=fixed | P1 high src/simulator.rs:180 - Batch assertion checkpoints used run_id "batch" that sorts before run-* ids, breaking raw stream monotonicity. Fixed by using run_id "run-batch" (sorts after all numbered runs under the derived Ord contract); regression test added.
