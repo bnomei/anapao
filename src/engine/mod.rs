@@ -527,6 +527,8 @@ fn run_single_internal(
     defer_terminal_step_end: bool,
     emit_event: &mut dyn FnMut(RunEvent) -> Result<(), RunError>,
 ) -> Result<RunReport, RunError> {
+    validate_capture_selection(compiled, config)?;
+
     let mut report = RunReport::new(compiled.scenario.id.clone(), config.seed);
     let mut state = init_state(compiled);
     let runtime = ExprRuntime::new();
@@ -2079,6 +2081,39 @@ fn capture_step(
     }
 }
 
+/// Rejects capture selections that reference nothing in the compiled scenario.
+/// An unknown `capture_metrics` key would otherwise resolve to `0.0` via
+/// `metric_value` and emit a fabricated all-zero series under the wrong label; an
+/// unknown `capture_nodes` id would be silently ignored. A capture metric is valid
+/// if it resolves to a node (node-backed metric) or is a tracked metric, mirroring
+/// what `metric_value` can actually resolve.
+fn validate_capture_selection(
+    compiled: &CompiledScenario,
+    config: &RunConfig,
+) -> Result<(), RunError> {
+    for node_id in &config.capture.capture_nodes {
+        if !compiled.node_index_by_id.contains_key(node_id) {
+            return Err(RunError::InvalidRunConfig {
+                name: format!("run.capture.capture_nodes.{node_id}"),
+                reason: "references an unknown node".to_string(),
+            });
+        }
+    }
+
+    for metric in &config.capture.capture_metrics {
+        let resolves = metric_node_index(compiled, metric).is_some()
+            || compiled.scenario.tracked_metrics.contains(metric);
+        if !resolves {
+            return Err(RunError::InvalidRunConfig {
+                name: format!("run.capture.capture_metrics.{metric}"),
+                reason: "does not resolve to a tracked metric or node".to_string(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
 fn should_capture_step(config: &RunConfig, step: u64, force: bool) -> bool {
     if force {
         return true;
@@ -3039,6 +3074,58 @@ mod tests {
         assert_eq!(report.final_node_values.get(&source), Some(&0.0));
         assert_eq!(report.final_node_values.get(&queue), Some(&1.0));
         assert_eq!(report.final_node_values.get(&sink), Some(&2.0));
+    }
+
+    #[test]
+    fn run_single_rejects_unresolvable_capture_keys() {
+        let source = NodeId::fixture("source");
+        let sink = NodeId::fixture("sink");
+        let metric_sink = MetricKey::fixture("sink");
+
+        let build = || {
+            let mut scenario = ScenarioSpec::new(ScenarioId::fixture("scenario-capture-validate"))
+                .with_node(NodeSpec::new(source.clone(), NodeKind::Source).with_initial_value(1.0))
+                .with_node(NodeSpec::new(sink.clone(), NodeKind::Sink))
+                .with_edge(EdgeSpec::new(
+                    EdgeId::fixture("edge"),
+                    source.clone(),
+                    sink.clone(),
+                    TransferSpec::Fixed { amount: 1.0 },
+                ));
+            scenario.tracked_metrics.insert(metric_sink.clone());
+            scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 1 }];
+            compile_scenario(&scenario).expect("scenario should compile")
+        };
+
+        // A mistyped capture metric must be rejected, not recorded as all-zeros.
+        let compiled = build();
+        let mut capture = CaptureConfig::default();
+        capture.capture_metrics.insert(MetricKey::fixture("snk"));
+        let config = RunConfig { seed: 1, max_steps: 5, capture };
+        match run_single(&compiled, &config) {
+            Err(RunError::InvalidRunConfig { name, .. }) => {
+                assert_eq!(name, "run.capture.capture_metrics.snk");
+            }
+            other => panic!("expected InvalidRunConfig, got {other:?}"),
+        }
+
+        // An unknown capture node id must also be rejected.
+        let mut capture = CaptureConfig::default();
+        capture.capture_nodes.insert(NodeId::fixture("nope"));
+        let config = RunConfig { seed: 1, max_steps: 5, capture };
+        match run_single(&compiled, &config) {
+            Err(RunError::InvalidRunConfig { name, .. }) => {
+                assert_eq!(name, "run.capture.capture_nodes.nope");
+            }
+            other => panic!("expected InvalidRunConfig, got {other:?}"),
+        }
+
+        // The real tracked metric and a real node id both resolve and run fine.
+        let mut capture = CaptureConfig::default();
+        capture.capture_metrics.insert(metric_sink.clone());
+        capture.capture_nodes.insert(sink.clone());
+        let config = RunConfig { seed: 1, max_steps: 5, capture };
+        run_single(&compiled, &config).expect("valid capture keys should run");
     }
 
     #[test]

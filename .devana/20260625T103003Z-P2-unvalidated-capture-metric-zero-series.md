@@ -1,5 +1,5 @@
 DEVANA-FINDING: v1
-Priority: P2 | Confidence: high | Security-sensitive: no | Status: open
+Priority: P2 | Confidence: high | Security-sensitive: no | Status: fixed
 Location: src/engine/mod.rs:1978 | Slug: unvalidated-capture-metric-zero-series
 
 # Unknown capture_metrics key silently records an all-zero series
@@ -45,6 +45,7 @@ After working this report, preserve the original finding body. Update line 2 `St
 ## Status Notes
 
 - 2026-06-25: open by Devana. Initial report written from static source inspection.
+- 2026-06-27: fixed. Confirmed `validate_run_config` lacks the scenario so it can't check capture keys, and `capture_step` records `metric_value` (which returns 0.0 for an unresolvable key). Added `validate_capture_selection(compiled, config)` called at the very top of `run_single_internal` (the central path for single, streaming, and batch runs, all of which have compiled + config). It rejects an unknown `capture_nodes` id and any `capture_metrics` key that resolves to neither a node nor a tracked metric — the exact resolution `metric_value` performs — returning `RunError::InvalidRunConfig` with `run.capture.capture_metrics.<key>` / `run.capture.capture_nodes.<id>`. Also validated `capture_nodes` (the report's milder omission case) for symmetry. Added regression test `run_single_rejects_unresolvable_capture_keys` (mistyped metric `snk` and unknown node `nope` both rejected; the real tracked metric + real node id run fine). Full `cargo test` green (no fixture captured an unresolvable key).
 
 DEVANA-KEY: src/engine/mod.rs:1978 | P2 | unvalidated-capture-metric-zero-series
-DEVANA-SUMMARY: Status=open | P2 high src/engine/mod.rs:1978 - An unknown capture_metrics key is never validated and metric_value returns 0.0, so a mistyped/stale key silently emits an all-zero series instead of an error.
+DEVANA-SUMMARY: Status=fixed | P2 high src/engine/mod.rs:1978 - An unknown capture_metrics key was never validated and metric_value returned 0.0, emitting a fabricated all-zero series. Fixed by validate_capture_selection in run_single_internal rejecting capture keys that resolve to no node or tracked metric (and unknown capture_nodes); regression test added.
