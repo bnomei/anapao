@@ -331,12 +331,20 @@ fn observe_batch_scalar(
 ) -> ScalarObservation {
     match selector {
         MetricSelector::Final => {
-            let context = "batch.aggregate_series.final";
-            let value = batch_report
-                .aggregate_series
-                .get(metric)
-                .and_then(|table| table.points.last())
-                .map(|point| point.value);
+            // Aggregate the per-run terminal values, mirroring how
+            // `evaluate_batch_probability_band` reads `run.final_metrics`. Using
+            // the last point of `aggregate_series` would instead report the mean
+            // at the highest captured step, which counts only the runs that
+            // reached that step and diverges from the cross-run final value users
+            // expect when runs differ in length.
+            let context = "batch.runs.final_metrics.mean";
+            let (sum, count) = batch_report.runs.iter().fold((0.0, 0u64), |(sum, count), run| {
+                match run.final_metrics.get(metric).copied() {
+                    Some(value) => (sum + value, count + 1),
+                    None => (sum, count),
+                }
+            });
+            let value = (count > 0).then(|| sum / count as f64);
             scalar_observation(metric, context, value)
         }
         MetricSelector::Step(step) => {
@@ -910,7 +918,7 @@ mod tests {
             .expect("missing metric result");
         assert!(missing_metric
             .actual
-            .contains("missing metric `missing` at `batch.aggregate_series.final`"));
+            .contains("missing metric `missing` at `batch.runs.final_metrics.mean`"));
 
         let missing_step = report
             .results
@@ -951,6 +959,62 @@ mod tests {
             evaluate_run_expectations(&empty_series_run, &[expectation]).expect("evaluation");
         assert_eq!(empty_report.failed, 1);
         assert_eq!(empty_report.results[0].actual, "series has no points");
+    }
+
+    #[test]
+    fn batch_final_selector_averages_per_run_finals_across_uneven_run_lengths() {
+        // Two runs of different lengths. The aggregate-series tail at the highest
+        // step reflects only the longer run (10.0), but the cross-run final value
+        // is the mean of per-run finals: (10 + 3) / 2 = 6.5.
+        let throughput = MetricKey::fixture("throughput");
+
+        let mut batch_report =
+            BatchReport::new(ScenarioId::fixture("scenario"), 2, ExecutionMode::SingleThread);
+        batch_report.completed_runs = 2;
+        batch_report.aggregate_series.insert(
+            throughput.clone(),
+            SeriesTable {
+                metric: throughput.clone(),
+                points: vec![
+                    SeriesPoint::new(0, 0.0),
+                    SeriesPoint::new(3, 6.5),
+                    // Only the longer run reaches step 10, so the tail is its value.
+                    SeriesPoint::new(10, 10.0),
+                ],
+            },
+        );
+        batch_report.runs = vec![
+            BatchRunSummary {
+                run_index: 0,
+                seed: 100,
+                completed: true,
+                steps_executed: 10,
+                final_metrics: BTreeMap::from([(throughput.clone(), 10.0)]),
+                manifest: None,
+            },
+            BatchRunSummary {
+                run_index: 1,
+                seed: 101,
+                completed: true,
+                steps_executed: 3,
+                final_metrics: BTreeMap::from([(throughput.clone(), 3.0)]),
+                manifest: None,
+            },
+        ];
+
+        let expectations = vec![Expectation::Equals {
+            metric: throughput,
+            selector: MetricSelector::Final,
+            expected: 6.5,
+        }];
+
+        let report = evaluate_batch_expectations(&batch_report, &expectations).expect("evaluation");
+        assert_eq!(report.passed, 1, "batch Final should be the mean of per-run finals, not 10.0");
+        assert_eq!(report.failed, 0);
+        assert!(report.results[0]
+            .evidence_refs
+            .iter()
+            .any(|reference| reference.context == "batch.runs.final_metrics.mean"));
     }
 
     #[test]
@@ -1109,7 +1173,13 @@ mod tests {
                 seed: run_index as u64 + 100,
                 completed: true,
                 steps_executed: 2,
-                final_metrics: BTreeMap::from([(pass_rate.clone(), value)]),
+                // A tracked metric appears in both the aggregate series and each
+                // run's final_metrics. throughput is constant 10.0 so its per-run
+                // mean matches the aggregate-series tail.
+                final_metrics: BTreeMap::from([
+                    (pass_rate.clone(), value),
+                    (throughput.clone(), 10.0),
+                ]),
                 manifest: None,
             })
             .collect::<Vec<_>>();
