@@ -1,5 +1,5 @@
 DEVANA-FINDING: v1
-Priority: P3 | Confidence: medium | Security-sensitive: no | Status: open
+Priority: P3 | Confidence: medium | Security-sensitive: no | Status: fixed
 Location: src/artifact/mod.rs:287 | Slug: series-csv-nonfinite-values
 
 # series.csv (and variables.csv) emit non-reparseable `NaN`/`inf`/`-inf`
@@ -45,6 +45,7 @@ After working this report, preserve the original finding body. Update line 2 `St
 ## Status Notes
 
 - 2026-06-25: open by Devana. Initial report written from static source inspection.
+- 2026-06-27: fixed. Confirmed the artifact-module `format_f64` (ryu-based, distinct from the assertions one) formatted non-finite values as bare `NaN`/`inf`/`-inf` and fed series.csv (319/342), variables.csv (360/373) and summary.csv (418+). Chose the empty-field representation (over reject/sentinel): rejecting would abort the whole pack for one bad value, and an empty field is the conventional CSV "missing value", consistent with the stats path treating non-finite samples as absent. Applied the guard centrally in `format_f64` (returns `String::new()` for non-finite) so series, variables, and summary are all covered uniformly; summary values are already stats-filtered to finite, so this is pure defense-in-depth there. Finite formatting is unchanged (`format_f64(2.0)` == "2.0"). Added regression test `write_series_csv_emits_empty_field_for_non_finite_values` (unit checks on NaN/inf/-inf plus a full write asserting rows `flow,1,` and `flow,2,`). Full `cargo test` green.
 
 DEVANA-KEY: src/artifact/mod.rs:287 | P3 | series-csv-nonfinite-values
-DEVANA-SUMMARY: Status=open | P3 medium src/artifact/mod.rs:287 - series.csv/variables.csv format values via ryu with no finite guard, emitting non-reparseable NaN/inf/-inf tokens in numeric columns.
+DEVANA-SUMMARY: Status=fixed | P3 medium src/artifact/mod.rs:287 - series.csv/variables.csv formatted values via ryu with no finite guard, emitting non-reparseable NaN/inf/-inf tokens. Fixed by emitting an empty field for non-finite values in format_f64; regression test added.

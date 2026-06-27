@@ -499,6 +499,13 @@ fn encode_csv_field(value: &str) -> String {
 }
 
 fn format_f64(value: f64) -> String {
+    // A non-finite value has no reparseable numeric CSV token; ryu would render
+    // it as a bare `NaN`/`inf`/`-inf` that breaks downstream `parse::<f64>()`.
+    // Emit an empty field (a missing value) instead, mirroring how the stats path
+    // treats non-finite samples as absent.
+    if !value.is_finite() {
+        return String::new();
+    }
     let mut buffer = ryu::Buffer::new();
     buffer.format(value).to_owned()
 }
@@ -850,6 +857,42 @@ mod tests {
             .map(str::to_owned)
             .collect::<Vec<_>>();
         assert_eq!(variable_rows, vec!["variable,step,value"]);
+    }
+
+    #[test]
+    fn write_series_csv_emits_empty_field_for_non_finite_values() {
+        // Non-finite series values must not land in the numeric `value` column as
+        // ryu's bare `NaN`/`inf`/`-inf` tokens, which break downstream parse::<f64>.
+        assert_eq!(format_f64(f64::NAN), "");
+        assert_eq!(format_f64(f64::INFINITY), "");
+        assert_eq!(format_f64(f64::NEG_INFINITY), "");
+        assert_eq!(format_f64(2.0), "2.0");
+
+        let tempdir = tempdir().expect("tempdir");
+        let mut run_report = RunReport::new(ScenarioId::fixture("scenario-nonfinite"), 1);
+        run_report.series.insert(
+            MetricKey::fixture("flow"),
+            SeriesTable {
+                metric: MetricKey::fixture("flow"),
+                points: vec![
+                    SeriesPoint::new(0, 1.0),
+                    SeriesPoint::new(1, f64::INFINITY),
+                    SeriesPoint::new(2, f64::NAN),
+                ],
+            },
+        );
+
+        write_run_artifacts(tempdir.path(), &run_report, &[]).expect("write run artifacts");
+
+        let series_rows = fs::read_to_string(tempdir.path().join(SERIES_FILE))
+            .expect("read series")
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(series_rows[0], "metric,step,value");
+        assert_eq!(series_rows[1], "flow,0,1.0");
+        assert_eq!(series_rows[2], "flow,1,");
+        assert_eq!(series_rows[3], "flow,2,");
     }
 
     #[test]
