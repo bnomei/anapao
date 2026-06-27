@@ -1,5 +1,5 @@
 DEVANA-FINDING: v1
-Priority: P2 | Confidence: high | Security-sensitive: no | Status: open
+Priority: P2 | Confidence: high | Security-sensitive: no | Status: fixed
 Location: src/engine/mod.rs:439 | Slug: queue-capacity-not-enforced
 
 # Queue node capacity is validated at compile time but not enforced at runtime
@@ -46,6 +46,7 @@ After working this report, preserve the original finding body. Update line 2 `St
 ## Status Notes
 
 - 2026-06-25: open by Devana. Initial report written from static source inspection.
+- 2026-06-27: fixed. Confirmed no runtime path read `QueueNodeConfig.capacity`. Rather than clip inside `record_arrival` (which only updates the release-scheduling bucket and does not know the committed amount), enforced at `apply_transfer_plan` — the single chokepoint all three transfer paths (any/all/gate) funnel through. Added `queue_capacity_for_node` and `accepted_queue_arrival`, which clip the moved amount to `capacity - held` when the target is a capacity-bounded queue (held == the queue's node value, since arrivals raise it and releases lower it; checked live so capacity freed by an earlier same-step release is reusable). The un-accepted remainder stays at the source (buffer backpressure), and `transferred_amount` in the transfer log reflects the clipped amount while `requested_amount` keeps the original ask. Non-queue targets and uncapped queues are unaffected (pool capacity is a separate report). Added regression test `run_single_queue_capacity_bounds_held_inventory` (capacity-2 queue fed by a source of 5 -> queue holds 2, source keeps 3). Full `cargo test` green.
 
 DEVANA-KEY: src/engine/mod.rs:439 | P2 | queue-capacity-not-enforced
-DEVANA-SUMMARY: Status=open | P2 high src/engine/mod.rs:439 - Queue capacity config is validated at compile time but never enforced when recording arrivals.
+DEVANA-SUMMARY: Status=fixed | P2 high src/engine/mod.rs:439 - Queue capacity config was validated at compile time but never enforced at runtime. Fixed by clipping arrivals to remaining capacity in apply_transfer_plan; regression test added.

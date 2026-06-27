@@ -1443,18 +1443,22 @@ fn apply_transfer_plan(
     step: u64,
     transfer_log: &mut Vec<TransferRecord>,
 ) {
+    // Clip the amount actually moved so a capacity-bounded queue target cannot
+    // overflow; the unaccepted remainder stays at the source.
+    let transfer = accepted_queue_arrival(compiled, state, plan.to_index, plan.transfer);
+
     if let Some(value) = state.node_values.get_mut(plan.from_index) {
-        *value = canonicalize_float(*value - plan.transfer);
+        *value = canonicalize_float(*value - transfer);
     }
     if let Some(value) = state.node_values.get_mut(plan.to_index) {
-        *value = canonicalize_float(*value + plan.transfer);
+        *value = canonicalize_float(*value + transfer);
     }
 
     if let Some(node_id) = compiled.node_order.get(plan.from_index) {
-        timeline.record_release(compiled, node_id, plan.transfer);
+        timeline.record_release(compiled, node_id, transfer);
     }
     if let Some(node_id) = compiled.node_order.get(plan.to_index) {
-        timeline.record_arrival(compiled, node_id, plan.transfer, step);
+        timeline.record_arrival(compiled, node_id, transfer, step);
     }
 
     transfer_log.push(TransferRecord {
@@ -1463,7 +1467,7 @@ fn apply_transfer_plan(
         from_node_id: plan.from_node_id,
         to_node_id: plan.to_node_id,
         requested_amount: canonicalize_float(plan.requested),
-        transferred_amount: canonicalize_float(plan.transfer),
+        transferred_amount: canonicalize_float(transfer),
     });
 }
 
@@ -1597,6 +1601,35 @@ fn queue_release_per_step_for_node(compiled: &CompiledScenario, node_id: &NodeId
         NodeConfig::Queue(config) => config.release_per_step.max(1),
         _ => 1,
     }
+}
+
+fn queue_capacity_for_node(compiled: &CompiledScenario, node_id: &NodeId) -> Option<u64> {
+    match &compiled.scenario.nodes.get(node_id)?.config {
+        NodeConfig::Queue(config) => config.capacity,
+        _ => None,
+    }
+}
+
+/// Clips a transfer arriving at `to_index` so a capacity-bounded queue never holds
+/// more than its configured capacity. The queue's held inventory is tracked by its
+/// node value (arrivals raise it, releases lower it), so the remaining headroom is
+/// `capacity - held`. Non-queue targets and uncapped queues are unaffected. The
+/// un-accepted remainder stays at the source node, modelling buffer backpressure.
+fn accepted_queue_arrival(
+    compiled: &CompiledScenario,
+    state: &EngineState,
+    to_index: usize,
+    transfer: f64,
+) -> f64 {
+    let Some(node_id) = compiled.node_order.get(to_index) else {
+        return transfer;
+    };
+    let Some(capacity) = queue_capacity_for_node(compiled, node_id) else {
+        return transfer;
+    };
+    let held = state.node_values.get(to_index).copied().unwrap_or(0.0).max(0.0);
+    let remaining = canonicalize_float((capacity as f64 - held).max(0.0));
+    canonicalize_float(transfer.min(remaining))
 }
 
 fn node_mode_for_node<'a>(
@@ -2958,6 +2991,42 @@ mod tests {
         assert_eq!(report.final_node_values.get(&source), Some(&0.0));
         assert_eq!(report.final_node_values.get(&queue), Some(&1.0));
         assert_eq!(report.final_node_values.get(&sink), Some(&2.0));
+    }
+
+    #[test]
+    fn run_single_queue_capacity_bounds_held_inventory() {
+        // A capacity-2 queue fed by a source holding 5. The queue must never hold
+        // more than its capacity; the un-accepted remainder stays at the source.
+        let source = NodeId::fixture("source");
+        let queue = NodeId::fixture("queue");
+
+        let mut scenario = ScenarioSpec::new(ScenarioId::fixture("scenario-queue-capacity"))
+            .with_node(pool_with_mode("source", 5.0, TriggerMode::Automatic, ActionMode::PushAny))
+            .with_node(NodeSpec::new(queue.clone(), NodeKind::Queue).with_config(
+                NodeConfig::Queue(QueueNodeConfig {
+                    capacity: Some(2),
+                    release_per_step: 1,
+                    mode: NodeModeConfig {
+                        trigger_mode: TriggerMode::Automatic,
+                        action_mode: ActionMode::PushAny,
+                    },
+                }),
+            ))
+            .with_edge(EdgeSpec::new(
+                EdgeId::fixture("edge-source-queue"),
+                source.clone(),
+                queue.clone(),
+                TransferSpec::Remaining,
+            ));
+        scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 3 }];
+
+        let compiled = compile_scenario(&scenario).expect("scenario should compile");
+        let config = RunConfig { seed: 33, max_steps: 10, capture: CaptureConfig::disabled() };
+        let report = run_single(&compiled, &config).expect("run should succeed");
+
+        // Without runtime enforcement the queue would hold all 5 units.
+        assert_eq!(report.final_node_values.get(&queue), Some(&2.0));
+        assert_eq!(report.final_node_values.get(&source), Some(&3.0));
     }
 
     #[test]
