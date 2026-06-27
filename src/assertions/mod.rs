@@ -420,6 +420,29 @@ fn evaluate_monotonic_non_decreasing(
         };
     };
 
+    // A non-finite point makes IEEE-754 ordered comparisons false on both sides,
+    // so a NaN between a decreasing pair would otherwise hide the decrease and
+    // produce a false pass. A series containing NaN/inf is not a well-defined
+    // monotonic series, so fail explicitly before the ordering check (which is
+    // then guaranteed to run over finite values only).
+    if let Some(point) = points.iter().find(|point| !point.value.is_finite()) {
+        evidence_refs.push(EvidenceRef::new(
+            metric.clone(),
+            format!("{context_prefix}.step={}", point.step),
+        ));
+        return AssertionResult {
+            expectation: expectation.clone(),
+            passed: false,
+            expected,
+            actual: format!(
+                "non-finite series value {} at step {}",
+                format_f64(point.value),
+                point.step
+            ),
+            evidence_refs,
+        };
+    }
+
     if let Some((left, right)) = points.windows(2).find_map(|window| {
         if window[0].value > window[1].value {
             Some((&window[0], &window[1]))
@@ -776,6 +799,37 @@ mod tests {
 
         assert_eq!(report.passed, 1);
         assert_eq!(report.failed, 1);
+    }
+
+    #[test]
+    fn run_monotonic_fails_on_non_finite_series_value() {
+        // A NaN between a decreasing pair must not produce a false pass: the
+        // series 5.0 -> NaN -> 1.0 is plainly not non-decreasing.
+        let metric = MetricKey::fixture("load");
+        let mut run_report = fixture_run_report();
+        run_report.series.insert(
+            metric.clone(),
+            SeriesTable {
+                metric: metric.clone(),
+                points: vec![
+                    SeriesPoint::new(0, 5.0),
+                    SeriesPoint::new(1, f64::NAN),
+                    SeriesPoint::new(2, 1.0),
+                ],
+            },
+        );
+
+        let expectations = vec![Expectation::MonotonicNonDecreasing { metric: metric.clone() }];
+        let report = evaluate_run_expectations(&run_report, &expectations).expect("evaluation");
+
+        assert_eq!(report.failed, 1, "NaN in a decreasing series must fail, not falsely pass");
+        let monotonic = &report.results[0];
+        assert!(!monotonic.passed);
+        assert!(monotonic.actual.contains("non-finite"));
+        assert!(monotonic
+            .evidence_refs
+            .iter()
+            .any(|reference| reference.context.contains("step=1")));
     }
 
     #[test]
