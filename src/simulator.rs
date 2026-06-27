@@ -84,6 +84,12 @@ impl Simulator {
         mut sink: Option<&mut dyn EventSink>,
     ) -> Result<(crate::types::RunReport, AssertionReport), SimError> {
         validation::validate_run_config(config)?;
+        // Validate the static portion of the expectations before running the
+        // engine, mirroring `validate_run_config`. Otherwise a malformed
+        // expectation (e.g. inverted `Between` bounds) would fail only after the
+        // streaming engine has pushed the full event stream into the sink but
+        // before `sink.flush()`, silently stranding the buffered events.
+        assertions::validate_expectations(expectations)?;
         let report = if let Some(active_sink) = sink.as_deref_mut() {
             engine::run_single_streaming_for_assertions(compiled, config, "run-0", active_sink)?
         } else {
@@ -478,6 +484,34 @@ mod tests {
         let names = sink.events().iter().map(|event| event.event_name()).collect::<Vec<_>>();
         assert!(names.contains(&"metric_snapshot"));
         assert!(names.contains(&"assertion_checkpoint"));
+    }
+
+    #[test]
+    fn simulator_run_with_malformed_expectation_streams_no_events() {
+        // A malformed expectation must be rejected before the engine streams any
+        // events into the sink, so a buffered/file-backed sink never ends up with
+        // events that were pushed but never flushed.
+        let compiled = fixture_compiled_scenario().expect("compiled fixture");
+        let mut sink = VecEventSink::new();
+        let expectations = vec![Expectation::Between {
+            metric: MetricKey::fixture("sink"),
+            selector: MetricSelector::Final,
+            min: 5.0,
+            max: 1.0, // inverted bounds -> static validation failure
+        }];
+
+        let result = Simulator::run_with_assertions_and_sink(
+            &compiled,
+            &deterministic_run_config(),
+            &expectations,
+            &mut sink,
+        );
+
+        assert!(result.is_err(), "malformed expectation must be rejected");
+        assert!(
+            sink.events().is_empty(),
+            "no events should be streamed when the expectation fails static validation"
+        );
     }
 
     #[test]

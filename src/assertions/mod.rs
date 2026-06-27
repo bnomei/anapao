@@ -139,6 +139,18 @@ impl AssertionReport {
     }
 }
 
+/// Statically validates expectations independently of any run/batch report.
+///
+/// Mirrors the per-expectation checks `evaluate_*_expectations` perform up front,
+/// so callers can reject malformed expectations (e.g. inverted `Between` bounds)
+/// before running the engine and streaming events to a sink.
+pub fn validate_expectations(expectations: &[Expectation]) -> Result<(), AssertionError> {
+    for expectation in expectations {
+        validate_expectation(expectation)?;
+    }
+    Ok(())
+}
+
 pub fn evaluate_run_expectations(
     run_report: &RunReport,
     expectations: &[Expectation],

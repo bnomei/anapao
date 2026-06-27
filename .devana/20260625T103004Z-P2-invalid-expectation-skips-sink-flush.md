@@ -1,5 +1,5 @@
 DEVANA-FINDING: v1
-Priority: P2 | Confidence: medium | Security-sensitive: no | Status: open
+Priority: P2 | Confidence: medium | Security-sensitive: no | Status: fixed
 Location: src/simulator.rs:92 | Slug: invalid-expectation-skips-sink-flush
 
 # Invalid expectation aborts streaming run after events are pushed but before flush
@@ -45,6 +45,7 @@ After working this report, preserve the original finding body. Update line 2 `St
 ## Status Notes
 
 - 2026-06-25: open by Devana. Initial report written from static source inspection.
+- 2026-06-27: fixed. Confirmed `evaluate_run_expectations` runs the static `validate_expectation` checks, and in the streaming path that happened only after the engine pushed the full event stream into the sink, so a malformed expectation (e.g. inverted `Between` bounds) returned via `?` before `sink.flush()`, stranding buffered events on a buffered/file sink. Chose the report's option 1 (validate static expectations before running) over option 2 (flush on error path): it matches the existing `validate_run_config` "validate static inputs before side effects" pattern and the batch sibling's ordering, and means no events are streamed at all on a bad expectation. Added a public `assertions::validate_expectations` wrapper (same per-expectation checks `evaluate_*` already run) and called it in `run_with_assertions_internal` right after `validate_run_config`, before the engine runs. Added regression test `simulator_run_with_malformed_expectation_streams_no_events` (inverted Between -> Err and `sink.events()` empty, proving validation precedes streaming). Full `cargo test` green.
 
 DEVANA-KEY: src/simulator.rs:92 | P2 | invalid-expectation-skips-sink-flush
-DEVANA-SUMMARY: Status=open | P2 medium src/simulator.rs:92 - A malformed expectation fails static validation after the streaming run already pushed events but before sink.flush(), so a buffered/file sink silently loses its buffered events.
+DEVANA-SUMMARY: Status=fixed | P2 medium src/simulator.rs:92 - A malformed expectation failed static validation after the streaming run pushed events but before sink.flush(), stranding buffered events. Fixed by validating expectations (assertions::validate_expectations) before running the engine, mirroring validate_run_config; regression test added.
