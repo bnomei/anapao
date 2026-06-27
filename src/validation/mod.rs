@@ -6,7 +6,7 @@ use crate::types::{
     BatchConfig, BatchRunTemplate, ConnectionKind, DelayNodeConfig, EdgeId, EdgeSpec,
     EndConditionSpec, MetricKey, NodeConfig, NodeId, NodeKind, NodeSpec, QueueNodeConfig,
     ResourceConnectionConfig, RunConfig, ScenarioSpec, StateConnectionRole, StateConnectionTarget,
-    TransferSpec,
+    TransferSpec, VariableSourceSpec,
 };
 
 /// Compiled scenario representation with deterministic node/edge iteration indexes.
@@ -55,6 +55,7 @@ pub fn compile_scenario(spec: &ScenarioSpec) -> Result<CompiledScenario, SetupEr
     validate_resource_connection_cycles(spec)?;
     validate_connection_invariants(spec)?;
     validate_node_invariants(spec)?;
+    validate_variable_sources(spec)?;
 
     let node_order = spec.nodes.keys().cloned().collect::<Vec<_>>();
     let edge_order = spec.edges.keys().cloned().collect::<Vec<_>>();
@@ -572,6 +573,77 @@ fn is_whole_number(value: f64) -> bool {
     (value.fract()).abs() <= f64::EPSILON
 }
 
+/// Validates runtime variable sources against the invariants the stochastic
+/// samplers enforce, so an invalid source is rejected at compile time instead of
+/// being silently dropped at runtime (the samplers' errors are swallowed by
+/// `.ok()` in the engine, leaving the variable absent and surfacing later as a
+/// confusing `ExprError::UnknownVariable`).
+fn validate_variable_sources(spec: &ScenarioSpec) -> Result<(), SetupError> {
+    for (name, source) in &spec.variables.sources {
+        let path = format!("variables.sources.{name}");
+        match source {
+            VariableSourceSpec::Constant { value } => {
+                if !value.is_finite() {
+                    return Err(SetupError::InvalidParameter {
+                        name: format!("{path}.value"),
+                        reason: "must be finite".to_string(),
+                    });
+                }
+            }
+            VariableSourceSpec::RandomInterval { min, max } => {
+                if min > max {
+                    return Err(SetupError::InvalidParameter {
+                        name: format!("{path}.min"),
+                        reason: "min must be less than or equal to max".to_string(),
+                    });
+                }
+            }
+            VariableSourceSpec::RandomList { values } => {
+                if values.is_empty() {
+                    return Err(SetupError::InvalidParameter {
+                        name: format!("{path}.values"),
+                        reason: "must contain at least one element".to_string(),
+                    });
+                }
+                for (index, value) in values.iter().enumerate() {
+                    if !value.is_finite() {
+                        return Err(SetupError::InvalidParameter {
+                            name: format!("{path}.values[{index}]"),
+                            reason: "must be finite".to_string(),
+                        });
+                    }
+                }
+            }
+            VariableSourceSpec::RandomMatrix { values } => {
+                if values.is_empty() {
+                    return Err(SetupError::InvalidParameter {
+                        name: format!("{path}.values"),
+                        reason: "must contain at least one row".to_string(),
+                    });
+                }
+                for (row_index, row) in values.iter().enumerate() {
+                    if row.is_empty() {
+                        return Err(SetupError::InvalidParameter {
+                            name: format!("{path}.values[{row_index}]"),
+                            reason: "rows must contain at least one element".to_string(),
+                        });
+                    }
+                    for (col_index, value) in row.iter().enumerate() {
+                        if !value.is_finite() {
+                            return Err(SetupError::InvalidParameter {
+                                name: format!("{path}.values[{row_index}][{col_index}]"),
+                                reason: "must be finite".to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_node_invariants(spec: &ScenarioSpec) -> Result<(), SetupError> {
     for (node_id, node) in &spec.nodes {
         if !node.initial_value.is_finite() {
@@ -787,6 +859,70 @@ mod tests {
         assert_eq!(compiled.edge_index_by_id.get(&edge_a_id), Some(&0));
         assert_eq!(compiled.edge_index_by_id.get(&edge_m_id), Some(&1));
         assert_eq!(compiled.scenario, spec);
+    }
+
+    #[test]
+    fn compile_scenario_rejects_invalid_variable_sources() {
+        use crate::types::VariableSourceSpec;
+
+        let source = crate::types::NodeId::fixture("source");
+        let sink = crate::types::NodeId::fixture("sink");
+
+        let base = || {
+            ScenarioSpec::new(ScenarioId::fixture("scenario"))
+                .with_node(NodeSpec::new(source.clone(), NodeKind::Source))
+                .with_node(NodeSpec::new(sink.clone(), NodeKind::Sink))
+                .with_edge(EdgeSpec::new(
+                    crate::types::EdgeId::fixture("edge"),
+                    source.clone(),
+                    sink.clone(),
+                    TransferSpec::Remaining,
+                ))
+        };
+
+        let cases = vec![
+            (VariableSourceSpec::RandomInterval { min: 6, max: 1 }, "variables.sources.roll.min"),
+            (VariableSourceSpec::RandomList { values: vec![] }, "variables.sources.roll.values"),
+            (
+                VariableSourceSpec::RandomList { values: vec![f64::NAN] },
+                "variables.sources.roll.values[0]",
+            ),
+            (
+                VariableSourceSpec::RandomMatrix { values: vec![] },
+                "variables.sources.roll.values",
+            ),
+            (
+                VariableSourceSpec::RandomMatrix { values: vec![vec![]] },
+                "variables.sources.roll.values[0]",
+            ),
+            (
+                VariableSourceSpec::RandomMatrix { values: vec![vec![f64::INFINITY]] },
+                "variables.sources.roll.values[0][0]",
+            ),
+            (
+                VariableSourceSpec::Constant { value: f64::NAN },
+                "variables.sources.roll.value",
+            ),
+        ];
+
+        for (source_spec, expected_name) in cases {
+            let mut spec = base();
+            spec.variables.sources.insert("roll".to_string(), source_spec);
+            let error = compile_scenario(&spec).expect_err("invalid variable source must fail");
+            match error {
+                SetupError::InvalidParameter { name, .. } => {
+                    assert_eq!(name, expected_name);
+                }
+                other => panic!("expected InvalidParameter, got {other:?}"),
+            }
+        }
+
+        // A valid source still compiles.
+        let mut spec = base();
+        spec.variables
+            .sources
+            .insert("roll".to_string(), VariableSourceSpec::RandomInterval { min: 1, max: 6 });
+        compile_scenario(&spec).expect("valid variable source should compile");
     }
 
     #[test]

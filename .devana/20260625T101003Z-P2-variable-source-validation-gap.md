@@ -1,5 +1,5 @@
 DEVANA-FINDING: v1
-Priority: P2 | Confidence: high | Security-sensitive: no | Status: open
+Priority: P2 | Confidence: high | Security-sensitive: no | Status: fixed
 Location: src/engine/mod.rs:72 | Slug: variable-source-validation-gap
 
 # Invalid scenario variable sources pass compile and are silently dropped at runtime
@@ -55,6 +55,7 @@ After working this report, preserve the original finding body. Update line 2 `St
 ## Status Notes
 
 - 2026-06-25: open by Devana. Initial report written from static source inspection.
+- 2026-06-27: fixed. Confirmed `compile_scenario` never inspected `spec.variables.sources`; the engine samples them with `.ok()`, silently dropping invalid sources. Added a `validate_variable_sources` pass to `compile_scenario` (after `validate_node_invariants`) mirroring the exact sampler invariants in src/stochastic/mod.rs: `RandomInterval` requires min <= max; `RandomList` must be non-empty and all-finite; `RandomMatrix` must be non-empty, each row non-empty, all values finite; `Constant` must be finite. Errors are `SetupError::InvalidParameter` with `variables.sources.<name>...` paths, consistent with other validators. Added regression test `compile_scenario_rejects_invalid_variable_sources` covering reversed interval, empty list, non-finite list element, empty matrix, empty matrix row, non-finite matrix cell, and non-finite constant, plus a valid source compiling. Full `cargo test` green (no existing fixture relied on an invalid source).
 
 DEVANA-KEY: src/engine/mod.rs:72 | P2 | variable-source-validation-gap
-DEVANA-SUMMARY: Status=open | P2 high src/engine/mod.rs:72 - Variable sources are never validated at compile and invalid ones (reversed RandomInterval, empty list/matrix, non-finite) are silently dropped via .ok() in refresh_all.
+DEVANA-SUMMARY: Status=fixed | P2 high src/engine/mod.rs:72 - Variable sources were never validated at compile and invalid ones were silently dropped via .ok() in refresh_all. Fixed by adding validate_variable_sources to compile_scenario mirroring the sampler invariants; regression test added.
