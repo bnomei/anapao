@@ -485,6 +485,23 @@ fn validate_state_connection_invariants(
                     reason: "node targets cannot also declare a target connection".to_string(),
                 });
             }
+
+            // A Modifier edge mutates the target node's value directly, bypassing
+            // `record_arrival`/`record_release`. For Delay/Queue nodes that desyncs
+            // the physical value from the timeline schedule (release budgets are
+            // built only from scheduled tokens), stranding injected tokens or
+            // leaving phantom scheduled tokens. Reject rather than silently corrupt.
+            if matches!(state.role, StateConnectionRole::Modifier) {
+                if let Some(target) = spec.nodes.get(&edge.to) {
+                    if matches!(target.kind, NodeKind::Delay | NodeKind::Queue) {
+                        return Err(SetupError::InvalidParameter {
+                            name: format!("edges.{edge_id}.connection.state.target"),
+                            reason: "modifier state connections cannot target delay or queue nodes"
+                                .to_string(),
+                        });
+                    }
+                }
+            }
         }
         StateConnectionTarget::ResourceConnection => {
             let target_id =
@@ -1542,6 +1559,69 @@ mod tests {
             }
             other => panic!("expected InvalidParameter, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn compile_scenario_rejects_modifier_state_edge_targeting_timeline_node() {
+        use crate::types::NodeModeConfig;
+
+        let source = crate::types::NodeId::fixture("source");
+
+        let modifier_edge = |target: crate::types::NodeId| {
+            EdgeSpec::new(
+                crate::types::EdgeId::fixture("state-edge"),
+                source.clone(),
+                target,
+                TransferSpec::Remaining,
+            )
+            .with_connection(EdgeConnectionConfig {
+                kind: ConnectionKind::State,
+                resource: Default::default(),
+                state: StateConnectionConfig {
+                    role: StateConnectionRole::Modifier,
+                    formula: "+10".to_string(),
+                    target: StateConnectionTarget::Node,
+                    target_connection: None,
+                    resource_filter: None,
+                },
+            })
+        };
+
+        let delay = crate::types::NodeId::fixture("delay");
+        let delay_spec = ScenarioSpec::new(ScenarioId::fixture("scenario"))
+            .with_node(NodeSpec::new(source.clone(), NodeKind::Source))
+            .with_node(NodeSpec::new(delay.clone(), NodeKind::Delay).with_config(
+                NodeConfig::Delay(DelayNodeConfig { delay_steps: 5, mode: NodeModeConfig::default() }),
+            ))
+            .with_edge(modifier_edge(delay));
+
+        let error = compile_scenario(&delay_spec).expect_err("modifier into delay must fail");
+        match error {
+            SetupError::InvalidParameter { name, reason } => {
+                assert_eq!(name, "edges.state-edge.connection.state.target");
+                assert_eq!(reason, "modifier state connections cannot target delay or queue nodes");
+            }
+            other => panic!("expected InvalidParameter, got {other:?}"),
+        }
+
+        let queue = crate::types::NodeId::fixture("queue");
+        let queue_spec = ScenarioSpec::new(ScenarioId::fixture("scenario"))
+            .with_node(NodeSpec::new(source.clone(), NodeKind::Source))
+            .with_node(NodeSpec::new(queue.clone(), NodeKind::Queue).with_config(
+                NodeConfig::Queue(QueueNodeConfig {
+                    capacity: None,
+                    release_per_step: 1,
+                    mode: NodeModeConfig::default(),
+                }),
+            ))
+            .with_edge(modifier_edge(queue));
+
+        let error = compile_scenario(&queue_spec).expect_err("modifier into queue must fail");
+        assert!(matches!(
+            error,
+            SetupError::InvalidParameter { reason, .. }
+                if reason == "modifier state connections cannot target delay or queue nodes"
+        ));
     }
 
     #[test]

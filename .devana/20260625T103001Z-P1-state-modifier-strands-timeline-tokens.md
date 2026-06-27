@@ -1,5 +1,5 @@
 DEVANA-FINDING: v1
-Priority: P1 | Confidence: high | Security-sensitive: no | Status: open
+Priority: P1 | Confidence: high | Security-sensitive: no | Status: fixed
 Location: src/engine/mod.rs:1658 | Slug: state-modifier-strands-timeline-tokens
 
 # State-modifier edge into a Delay/Queue node desyncs node value from timeline schedule
@@ -50,6 +50,7 @@ After working this report, preserve the original finding body. Update line 2 `St
 ## Status Notes
 
 - 2026-06-25: open by Devana. Initial report written from static source inspection.
+- 2026-06-27: fixed. Confirmed `apply_state_connections` writes `node_values[to_index]` directly with no timeline call, while `release_budgets` is derived only from `delay_ready`/`queue_ready` (fed by `record_arrival`), so a Modifier delta into a Delay/Queue node strands the injected tokens (or, with negative deltas, leaves phantom scheduled tokens). Chose the report's option 1 (reject at validation) over option 2 (route through the timeline): `apply_state_connections` isn't even passed the `TimelineRuntimeState`, and reconciling negative deltas would require correctly un-scheduling future-dated tokens — high risk for a feature that is currently always-broken. Added a guard in `validate_state_connection_invariants` (the `StateConnectionTarget::Node` arm): a Modifier edge whose target node kind is `Delay` or `Queue` is rejected with `edges.<id>.connection.state.target` / "modifier state connections cannot target delay or queue nodes". Turns silent corruption into a clear compile error, consistent with the compile=validated contract. Full `cargo test` already green with the guard (no existing fixture relied on the broken behavior). Added regression test `compile_scenario_rejects_modifier_state_edge_targeting_timeline_node` covering both Delay and Queue targets.
 
 DEVANA-KEY: src/engine/mod.rs:1658 | P1 | state-modifier-strands-timeline-tokens
-DEVANA-SUMMARY: Status=open | P1 high src/engine/mod.rs:1658 - Modifier state edges mutate a Delay/Queue node's value directly without record_arrival, so injected tokens get zero release budget and are stranded forever (and negative deltas leave phantom scheduled tokens).
+DEVANA-SUMMARY: Status=fixed | P1 high src/engine/mod.rs:1658 - Modifier state edges mutated a Delay/Queue node's value directly without record_arrival, stranding injected tokens. Fixed by rejecting modifier-into-delay/queue edges at compile (validate_state_connection_invariants); regression test added.
