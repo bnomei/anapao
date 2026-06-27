@@ -1018,7 +1018,12 @@ fn apply_all_edge_group(
             from_available_override,
         )?
         else {
-            return Ok(false);
+            // A zero-request edge (e.g. Fraction { numerator: 0 } or a currently
+            // zero MetricScaled) is trivially satisfiable and contributes no
+            // transfer. Skip it like the "Any" path does, rather than aborting the
+            // whole all-or-nothing group; the availability check below still
+            // enforces atomicity over the genuinely non-zero requests.
+            continue;
         };
 
         let available = canonicalize_float(
@@ -2295,6 +2300,43 @@ mod tests {
         assert_eq!(report.final_node_values.get(&sink_b), Some(&0.0));
         // Gate emptied: 2 tokens routed to sink-a, 2 dropped by the implicit lane.
         assert_eq!(report.final_node_values.get(&gate), Some(&0.0));
+    }
+
+    #[test]
+    fn run_single_push_all_group_skips_zero_request_edge() {
+        // PushAll node A with a fundable Fixed edge and a zero-request Fraction
+        // edge. The zero edge is trivially satisfiable and must not abort the
+        // group: A->B should still transfer 2.
+        let node_a = NodeId::fixture("a-source");
+        let node_b = NodeId::fixture("b-sink");
+        let node_c = NodeId::fixture("c-sink");
+
+        let mut scenario = ScenarioSpec::new(ScenarioId::fixture("scenario-push-all-zero"))
+            .with_node(pool_with_mode("a-source", 10.0, TriggerMode::Automatic, ActionMode::PushAll))
+            .with_node(NodeSpec::new(node_b.clone(), NodeKind::Pool))
+            .with_node(NodeSpec::new(node_c.clone(), NodeKind::Pool))
+            .with_edge(EdgeSpec::new(
+                EdgeId::fixture("edge-1"),
+                node_a.clone(),
+                node_b.clone(),
+                TransferSpec::Fixed { amount: 2.0 },
+            ))
+            .with_edge(EdgeSpec::new(
+                EdgeId::fixture("edge-2"),
+                node_a.clone(),
+                node_c.clone(),
+                TransferSpec::Fraction { numerator: 0, denominator: 1 },
+            ));
+        scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 1 }];
+
+        let compiled = compile_scenario(&scenario).expect("scenario should compile");
+        let config = RunConfig { seed: 12, max_steps: 5, capture: CaptureConfig::disabled() };
+        let report = run_single(&compiled, &config).expect("run should succeed");
+
+        // Without the fix neither transfer fires (A stays 10, B stays 0).
+        assert_eq!(report.final_node_values.get(&node_a), Some(&8.0));
+        assert_eq!(report.final_node_values.get(&node_b), Some(&2.0));
+        assert_eq!(report.final_node_values.get(&node_c), Some(&0.0));
     }
 
     #[test]

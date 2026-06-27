@@ -1,5 +1,5 @@
 DEVANA-FINDING: v1
-Priority: P1 | Confidence: high | Security-sensitive: no | Status: open
+Priority: P1 | Confidence: high | Security-sensitive: no | Status: fixed
 Location: src/engine/mod.rs:985 | Slug: all-group-zero-edge-aborts-transfers
 
 # A single zero-request edge aborts an entire PullAll/PushAll transfer group
@@ -49,6 +49,7 @@ After working this report, preserve the original finding body. Update line 2 `St
 ## Status Notes
 
 - 2026-06-25: open by Devana. Initial report written from static source inspection.
+- 2026-06-27: fixed. Confirmed `apply_all_edge_group` did `return Ok(false)` when `plan_edge_transfer_all` returned `None`, while the sibling `apply_any_edge_group` uses `continue`. Verified `plan_edge_transfer_all` returns `None` for the same set of trivial/structural cases the "Any" path skips: missing from/to index, self-loop (from==to), and quantized transfer <= 0 (the zero-request case). Changed the `None` arm to `continue`. The per-source availability check (now over only the genuinely non-zero planned requests) still enforces all-or-nothing atomicity. Left the edge-not-found arm (line 1006) as `return Ok(false)` — out of the report's scope and a structural anomaly. Added regression test `run_single_push_all_group_skips_zero_request_edge` (PushAll node A=10 with Fixed{2}->B and Fraction{0,1}->C: B->2, A->8, C->0; under the bug nothing fired). Full `cargo test` green.
 
 DEVANA-KEY: src/engine/mod.rs:985 | P1 | all-group-zero-edge-aborts-transfers
-DEVANA-SUMMARY: Status=open | P1 high src/engine/mod.rs:985 - In apply_all_edge_group a zero-request edge (Fraction numerator=0 / MetricScaled zero metric) returns Ok(false), silently suppressing all sibling PullAll/PushAll transfers.
+DEVANA-SUMMARY: Status=fixed | P1 high src/engine/mod.rs:985 - In apply_all_edge_group a zero-request edge returned Ok(false), suppressing all sibling PullAll/PushAll transfers. Fixed by skipping (continue) the None plan like the Any path; regression test added.
