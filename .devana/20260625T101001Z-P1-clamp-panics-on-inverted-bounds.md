@@ -1,5 +1,5 @@
 DEVANA-FINDING: v1
-Priority: P1 | Confidence: high | Security-sensitive: no | Status: open
+Priority: P1 | Confidence: high | Security-sensitive: no | Status: fixed
 Location: src/expr/mod.rs:640 | Slug: clamp-panics-on-inverted-bounds
 
 # Expression `clamp(value, min, max)` panics when `min > max`
@@ -52,6 +52,7 @@ After working this report, preserve the original finding body. Update line 2 `St
 ## Status Notes
 
 - 2026-06-25: open by Devana. Initial report written from static source inspection.
+- 2026-06-27: fixed. Confirmed both `eval_call` and `eval_call_with_resolver` called `value.clamp(min, max)`, which `f64::clamp` documents as panicking when `min > max`; args are arbitrary finite sub-expressions with no ordering guard. Chose option 2 (no-panic computation) over option 1 (typed error): adding an error variant is a public-API change, and graceful continuation suits transfer/metric expressions better than aborting a run for a benign swapped-bounds typo. Changed both arms to `value.clamp(a.min(b), a.max(b))`, normalizing the interval to `[min(a,b), max(a,b)]`. Args are guaranteed finite (eval_node returns NonFiniteResult before yielding non-finite), so min/max are finite and ordered and clamp cannot panic. Added regression test `evaluate_clamp_with_inverted_bounds_returns_error_free_result` covering both the `evaluate` path and the `evaluate_compiled_with_resolver` path (clamp(5,10,0)=5, -3=>0, 99=>10, normal ordering unchanged). All 31 expr unit tests green.
 
 DEVANA-KEY: src/expr/mod.rs:640 | P1 | clamp-panics-on-inverted-bounds
-DEVANA-SUMMARY: Status=open | P1 high src/expr/mod.rs:640 - Expression clamp(value,min,max) calls f64::clamp without a min<=max guard, so a finite expression with inverted bounds panics the evaluator instead of returning ExprError.
+DEVANA-SUMMARY: Status=fixed | P1 high src/expr/mod.rs:640 - Expression clamp(value,min,max) called f64::clamp without a min<=max guard, panicking on inverted bounds. Fixed by clamping to the normalized interval [min(a,b),max(a,b)] in both eval paths; regression test added.

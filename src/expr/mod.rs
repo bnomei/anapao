@@ -637,7 +637,14 @@ fn eval_call(
         "min" => binary("min", &evaluated, f64::min),
         "max" => binary("max", &evaluated, f64::max),
         "pow" => binary("pow", &evaluated, f64::powf),
-        "clamp" => ternary("clamp", &evaluated, |value, min, max| value.clamp(min, max)),
+        // Normalize the bounds before clamping: `f64::clamp` panics when
+        // `min > max`, but the args are arbitrary finite sub-expressions with no
+        // ordering guarantee. Clamping to `[min(a, b), max(a, b)]` keeps the
+        // evaluator's no-panic, error-returning contract and treats inverted
+        // bounds as the same interval.
+        "clamp" => {
+            ternary("clamp", &evaluated, |value, a, b| value.clamp(a.min(b), a.max(b)))
+        }
         _ => Err(ExprError::UnknownFunction { name: name.to_string() }),
     }
 }
@@ -664,7 +671,14 @@ where
         "min" => binary("min", &evaluated, f64::min),
         "max" => binary("max", &evaluated, f64::max),
         "pow" => binary("pow", &evaluated, f64::powf),
-        "clamp" => ternary("clamp", &evaluated, |value, min, max| value.clamp(min, max)),
+        // Normalize the bounds before clamping: `f64::clamp` panics when
+        // `min > max`, but the args are arbitrary finite sub-expressions with no
+        // ordering guarantee. Clamping to `[min(a, b), max(a, b)]` keeps the
+        // evaluator's no-panic, error-returning contract and treats inverted
+        // bounds as the same interval.
+        "clamp" => {
+            ternary("clamp", &evaluated, |value, a, b| value.clamp(a.min(b), a.max(b)))
+        }
         _ => Err(ExprError::UnknownFunction { name: name.to_string() }),
     }
 }
@@ -773,6 +787,33 @@ mod tests {
             .expect("expression should evaluate");
 
         assert_eq!(value, 4.0 + 8.0 + 2.0 + 0.0);
+    }
+
+    #[test]
+    fn evaluate_clamp_with_inverted_bounds_returns_error_free_result() {
+        let runtime = ExprRuntime::new();
+        let vars = BTreeMap::new();
+
+        // Inverted bounds must not panic; the interval is normalized to [0, 10].
+        assert_eq!(
+            runtime.evaluate("clamp(5, 10, 0)", &vars).expect("inverted bounds must not panic"),
+            5.0
+        );
+        assert_eq!(runtime.evaluate("clamp(-3, 10, 0)", &vars).expect("inverted bounds"), 0.0);
+        assert_eq!(runtime.evaluate("clamp(99, 10, 0)", &vars).expect("inverted bounds"), 10.0);
+        // Normal ordering still behaves identically.
+        assert_eq!(runtime.evaluate("clamp(5, 0, 10)", &vars).expect("normal bounds"), 5.0);
+
+        // The resolver evaluation path shares the same clamp implementation.
+        let compiled = runtime.compile("clamp(5, hi, lo)").expect("compile");
+        let resolved = runtime
+            .evaluate_compiled_with_resolver(&compiled, |name| match name {
+                "hi" => Some(10.0),
+                "lo" => Some(0.0),
+                _ => None,
+            })
+            .expect("resolver clamp with inverted bounds must not panic");
+        assert_eq!(resolved, 5.0);
     }
 
     #[test]
