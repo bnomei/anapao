@@ -1,5 +1,5 @@
 DEVANA-FINDING: v1
-Priority: P2 | Confidence: high | Security-sensitive: no | Status: open
+Priority: P2 | Confidence: high | Security-sensitive: no | Status: fixed
 Location: src/engine/mod.rs:1409 | Slug: pool-capacity-not-enforced
 
 # Pool capacity is validated at compile time but never enforced at runtime
@@ -48,6 +48,7 @@ After working this report, preserve the original finding body. Update line 2 `St
 ## Status Notes
 
 - 2026-06-25: open by Devana. Initial report written from static source inspection.
+- 2026-06-27: fixed. Decided `capacity` is a hard bound (validation already rejects an over-capacity initial value), so enforced it at runtime — the same chokepoint and approach as the queue-capacity fix (queue-capacity-not-enforced). Generalized the helper added there: `queue_capacity_for_node` -> `node_capacity_for_node` (returns capacity for both Pool and Queue), and `accepted_queue_arrival` -> `accepted_arrival`, called in `apply_transfer_plan`. A credit into a capacity-bounded Pool or Queue is clipped to `capacity - held` (held == node value), with the un-accepted remainder left at the source (backpressure). Added regression test `run_single_pool_capacity_bounds_stored_value` (capacity-10 pool fed 5/step for 3 steps holds 10, not 15; source keeps 90). Full `cargo test` green (no fixture relied on a pool exceeding its capacity).
 
 DEVANA-KEY: src/engine/mod.rs:1409 | P2 | pool-capacity-not-enforced
-DEVANA-SUMMARY: Status=open | P2 high src/engine/mod.rs:1409 - Pool capacity is validated as a ceiling at compile time but apply_transfer_plan credits the pool with no cap, so pool values freely exceed the validated capacity.
+DEVANA-SUMMARY: Status=fixed | P2 high src/engine/mod.rs:1409 - Pool capacity was validated as a ceiling at compile time but apply_transfer_plan credited the pool with no cap. Fixed by generalizing the queue-capacity clip (accepted_arrival) to also bound Pool capacity; regression test added.

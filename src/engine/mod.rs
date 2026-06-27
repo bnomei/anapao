@@ -1448,9 +1448,9 @@ fn apply_transfer_plan(
     step: u64,
     transfer_log: &mut Vec<TransferRecord>,
 ) {
-    // Clip the amount actually moved so a capacity-bounded queue target cannot
-    // overflow; the unaccepted remainder stays at the source.
-    let transfer = accepted_queue_arrival(compiled, state, plan.to_index, plan.transfer);
+    // Clip the amount actually moved so a capacity-bounded target (Pool or Queue)
+    // cannot overflow its capacity; the unaccepted remainder stays at the source.
+    let transfer = accepted_arrival(compiled, state, plan.to_index, plan.transfer);
 
     if let Some(value) = state.node_values.get_mut(plan.from_index) {
         *value = canonicalize_float(*value - transfer);
@@ -1608,19 +1608,25 @@ fn queue_release_per_step_for_node(compiled: &CompiledScenario, node_id: &NodeId
     }
 }
 
-fn queue_capacity_for_node(compiled: &CompiledScenario, node_id: &NodeId) -> Option<u64> {
+/// Returns the configured capacity of a capacity-bounded target node. Both Pool
+/// and Queue nodes treat `capacity` as a hard upper bound on the value they store
+/// (validation rejects an over-capacity initial value for each), so both are
+/// enforced at runtime. Other node kinds have no stored-value capacity.
+fn node_capacity_for_node(compiled: &CompiledScenario, node_id: &NodeId) -> Option<u64> {
     match &compiled.scenario.nodes.get(node_id)?.config {
+        NodeConfig::Pool(config) => config.capacity,
         NodeConfig::Queue(config) => config.capacity,
         _ => None,
     }
 }
 
-/// Clips a transfer arriving at `to_index` so a capacity-bounded queue never holds
-/// more than its configured capacity. The queue's held inventory is tracked by its
-/// node value (arrivals raise it, releases lower it), so the remaining headroom is
-/// `capacity - held`. Non-queue targets and uncapped queues are unaffected. The
-/// un-accepted remainder stays at the source node, modelling buffer backpressure.
-fn accepted_queue_arrival(
+/// Clips a transfer arriving at `to_index` so a capacity-bounded target (Pool or
+/// Queue) never holds more than its configured capacity. The held inventory is
+/// tracked by the node value (arrivals raise it, releases/outflows lower it), so
+/// the remaining headroom is `capacity - held`. Targets without a capacity are
+/// unaffected. The un-accepted remainder stays at the source node, modelling
+/// buffer backpressure.
+fn accepted_arrival(
     compiled: &CompiledScenario,
     state: &EngineState,
     to_index: usize,
@@ -1629,7 +1635,7 @@ fn accepted_queue_arrival(
     let Some(node_id) = compiled.node_order.get(to_index) else {
         return transfer;
     };
-    let Some(capacity) = queue_capacity_for_node(compiled, node_id) else {
+    let Some(capacity) = node_capacity_for_node(compiled, node_id) else {
         return transfer;
     };
     let held = state.node_values.get(to_index).copied().unwrap_or(0.0).max(0.0);
@@ -3033,6 +3039,41 @@ mod tests {
         assert_eq!(report.final_node_values.get(&source), Some(&0.0));
         assert_eq!(report.final_node_values.get(&queue), Some(&1.0));
         assert_eq!(report.final_node_values.get(&sink), Some(&2.0));
+    }
+
+    #[test]
+    fn run_single_pool_capacity_bounds_stored_value() {
+        // Pool sink with capacity 10 fed 5 units per step. Its stored value must
+        // never exceed capacity; the un-accepted remainder stays at the source.
+        let source = NodeId::fixture("source");
+        let pool = NodeId::fixture("pool");
+
+        let mut scenario = ScenarioSpec::new(ScenarioId::fixture("scenario-pool-capacity"))
+            .with_node(pool_with_mode("source", 100.0, TriggerMode::Automatic, ActionMode::PushAny))
+            .with_node(
+                NodeSpec::new(pool.clone(), NodeKind::Pool).with_config(NodeConfig::Pool(
+                    PoolNodeConfig {
+                        capacity: Some(10),
+                        allow_negative_start: false,
+                        mode: NodeModeConfig::default(),
+                    },
+                )),
+            )
+            .with_edge(EdgeSpec::new(
+                EdgeId::fixture("edge-source-pool"),
+                source.clone(),
+                pool.clone(),
+                TransferSpec::Fixed { amount: 5.0 },
+            ));
+        scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 3 }];
+
+        let compiled = compile_scenario(&scenario).expect("scenario should compile");
+        let config = RunConfig { seed: 34, max_steps: 10, capture: CaptureConfig::disabled() };
+        let report = run_single(&compiled, &config).expect("run should succeed");
+
+        // Without enforcement the pool would hold 15 (5 per step over 3 steps).
+        assert_eq!(report.final_node_values.get(&pool), Some(&10.0));
+        assert_eq!(report.final_node_values.get(&source), Some(&90.0));
     }
 
     #[test]
