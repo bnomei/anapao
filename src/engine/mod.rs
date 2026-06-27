@@ -1879,12 +1879,22 @@ fn node_value(compiled: &CompiledScenario, state: &EngineState, node_id: &NodeId
 }
 
 fn metric_value(compiled: &CompiledScenario, state: &EngineState, metric: &MetricKey) -> f64 {
-    if let Some(value) = state.metrics.get(metric).copied() {
-        return canonicalize_float(value);
-    }
-
+    // Prefer live simulation state so intra-step transfers (`MetricScaled`) and
+    // metric-derived gate weights observe the effect of earlier edges in the
+    // same step. `state.metrics` is only refreshed at the end of each step via
+    // `refresh_metrics`, so reading the cache first would return stale
+    // start-of-step values during edge evaluation. This mirrors the value that
+    // `refresh_metrics` would compute for the metric.
     if let Some(index) = metric_node_index(compiled, metric) {
         return canonicalize_float(state.node_values.get(index).copied().unwrap_or(0.0));
+    }
+
+    if compiled.scenario.tracked_metrics.contains(metric) {
+        return canonicalize_float(total_node_value(state));
+    }
+
+    if let Some(value) = state.metrics.get(metric).copied() {
+        return canonicalize_float(value);
     }
 
     0.0
@@ -2103,6 +2113,47 @@ mod tests {
         assert_eq!(report.final_node_values.get(&pool), Some(&0.0));
         assert_eq!(report.final_node_values.get(&sink_a), Some(&5.0));
         assert_eq!(report.final_node_values.get(&sink_b), Some(&5.0));
+        assert_eq!(report.steps_executed, 1);
+    }
+
+    #[test]
+    fn run_single_metric_scaled_edges_observe_intra_step_updates() {
+        // Two metric-scaled edges in the same step, both keyed on `sink-a`.
+        // The first edge raises `sink-a`; the second must observe the updated
+        // value, not the stale start-of-step metric cache.
+        let source = NodeId::fixture("source");
+        let sink_a = NodeId::fixture("sink-a");
+        let sink_b = NodeId::fixture("sink-b");
+        let metric_a = MetricKey::fixture("sink-a");
+
+        let mut scenario = ScenarioSpec::new(ScenarioId::fixture("scenario-intra-step-metric"))
+            .with_node(NodeSpec::new(source.clone(), NodeKind::Process).with_initial_value(20.0))
+            .with_node(NodeSpec::new(sink_a.clone(), NodeKind::Sink).with_initial_value(4.0))
+            .with_node(NodeSpec::new(sink_b.clone(), NodeKind::Sink))
+            .with_edge(EdgeSpec::new(
+                EdgeId::fixture("edge-1"),
+                source.clone(),
+                sink_a.clone(),
+                TransferSpec::MetricScaled { metric: metric_a.clone(), factor: 1.0 },
+            ))
+            .with_edge(EdgeSpec::new(
+                EdgeId::fixture("edge-2"),
+                source.clone(),
+                sink_b.clone(),
+                TransferSpec::MetricScaled { metric: metric_a.clone(), factor: 1.0 },
+            ));
+        scenario.tracked_metrics.insert(metric_a);
+        scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 1 }];
+
+        let compiled = compile_scenario(&scenario).expect("scenario should compile");
+        let config = RunConfig { seed: 1, max_steps: 5, capture: CaptureConfig::disabled() };
+        let report = run_single(&compiled, &config).expect("run should succeed");
+
+        // edge-1: metric sink-a = 4 -> transfer 4, sink-a becomes 8.
+        // edge-2: metric sink-a = 8 (live) -> transfer 8 to sink-b.
+        assert_eq!(report.final_node_values.get(&sink_a), Some(&8.0));
+        assert_eq!(report.final_node_values.get(&sink_b), Some(&8.0));
+        assert_eq!(report.final_node_values.get(&source), Some(&8.0));
         assert_eq!(report.steps_executed, 1);
     }
 
