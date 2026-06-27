@@ -1,5 +1,5 @@
 DEVANA-FINDING: v1
-Priority: P1 | Confidence: high | Security-sensitive: no | Status: open
+Priority: P1 | Confidence: high | Security-sensitive: no | Status: fixed
 Location: src/engine/mod.rs:1204 | Slug: zero-fraction-aborts-gate-routing
 
 # Zero-numerator fraction edge aborts entire gate routing group
@@ -47,6 +47,7 @@ After working this report, preserve the original finding body. Update line 2 `St
 ## Status Notes
 
 - 2026-06-25: open by Devana. Initial report written from static source inspection.
+- 2026-06-27: fixed. Confirmed `gate_weight_for_edge` returns `Ok(None)` for `Fraction { numerator: 0 }` (and non-finite weights), and `gate_routing_for_group` turned that into a whole-group `return Ok(None)`, collapsing weighted per-token routing to a flat dispatch. Changed the `else` arm to `continue` so a zero/non-finite lane is skipped — matching the adjacent `weight <= 0.0` skip — while real lanes still route weighted. Structural `None` cases (edge/node lookup failures at 1219-1227) were left as group aborts intentionally. If every lane is skipped, `lanes.is_empty()` still falls back to flat dispatch as before. Added regression test `run_single_sorting_gate_skips_zero_fraction_lane_keeps_weighted_routing`: a SortingGate with a 50% lane + a 0% lane routes 2 of 4 tokens to sink-a and drops 2 (gate empties to 0); under the bug the gate would retain 2 via flat dispatch. Full `cargo test` green.
 
 DEVANA-KEY: src/engine/mod.rs:1204 | P1 | zero-fraction-aborts-gate-routing
-DEVANA-SUMMARY: Status=open | P1 high src/engine/mod.rs:1204 - A zero-numerator Fraction gate edge aborts all weighted routing instead of being skipped.
+DEVANA-SUMMARY: Status=fixed | P1 high src/engine/mod.rs:1204 - A zero-numerator Fraction gate edge aborts all weighted routing instead of being skipped. Fixed by skipping the lane (continue) instead of aborting the group; regression test added.

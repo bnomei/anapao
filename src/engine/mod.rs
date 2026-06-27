@@ -1238,7 +1238,11 @@ fn gate_routing_for_group(
             runtime_variables,
         )?
         else {
-            return Ok(None);
+            // A zero-weight (e.g. `Fraction { numerator: 0 }`) or non-finite lane
+            // contributes no routing probability. Skip just this lane so the
+            // remaining lanes still route weighted, instead of aborting the whole
+            // gate group back to a flat dispatch.
+            continue;
         };
         if weight <= 0.0 {
             continue;
@@ -2216,6 +2220,48 @@ mod tests {
             second, 0,
             "new lane identities should not inherit prior index-scoped balancer history"
         );
+    }
+
+    #[test]
+    fn run_single_sorting_gate_skips_zero_fraction_lane_keeps_weighted_routing() {
+        // A SortingGate with a 50% lane and a 0% (Fraction { numerator: 0 }) lane.
+        // The zero lane must be skipped, not abort weighted routing. With per-token
+        // gate routing the deterministic balancer sends 2 of 4 tokens to sink-a and
+        // implicitly drops the other 2, leaving the gate empty. If the zero lane
+        // aborted routing, the engine would fall back to flat dispatch and the gate
+        // would retain the untransferred tokens.
+        let gate = NodeId::fixture("gate");
+        let sink_a = NodeId::fixture("sink-a");
+        let sink_b = NodeId::fixture("sink-b");
+
+        let mut scenario = ScenarioSpec::new(ScenarioId::fixture("scenario-zero-fraction-gate"))
+            .with_node(
+                NodeSpec::new(gate.clone(), NodeKind::SortingGate).with_initial_value(4.0),
+            )
+            .with_node(NodeSpec::new(sink_a.clone(), NodeKind::Pool))
+            .with_node(NodeSpec::new(sink_b.clone(), NodeKind::Pool))
+            .with_edge(EdgeSpec::new(
+                EdgeId::fixture("edge-a"),
+                gate.clone(),
+                sink_a.clone(),
+                TransferSpec::Fraction { numerator: 50, denominator: 100 },
+            ))
+            .with_edge(EdgeSpec::new(
+                EdgeId::fixture("edge-b"),
+                gate.clone(),
+                sink_b.clone(),
+                TransferSpec::Fraction { numerator: 0, denominator: 100 },
+            ));
+        scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 1 }];
+
+        let compiled = compile_scenario(&scenario).expect("scenario should compile");
+        let config = RunConfig { seed: 7, max_steps: 5, capture: CaptureConfig::disabled() };
+        let report = run_single(&compiled, &config).expect("run should succeed");
+
+        assert_eq!(report.final_node_values.get(&sink_a), Some(&2.0));
+        assert_eq!(report.final_node_values.get(&sink_b), Some(&0.0));
+        // Gate emptied: 2 tokens routed to sink-a, 2 dropped by the implicit lane.
+        assert_eq!(report.final_node_values.get(&gate), Some(&0.0));
     }
 
     #[test]
