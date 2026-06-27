@@ -826,87 +826,123 @@ fn apply_edge_transfers(
 ) -> Result<(), RunError> {
     let mut triggers = collect_step_triggers(compiled, step_plan, state);
 
-    for node_id in &compiled.node_order {
-        let gate_behavior = gate_behavior_for_node(compiled, node_id);
-        let mut node_acted = false;
-        let mut had_resource_groups = false;
-        let node_groups = step_plan.resource_groups_by_controller.get(node_id);
+    // Triggers only ever grow within a step (gates append targets, never remove
+    // them), so a single forward pass over `node_order` cannot activate a passive
+    // controller that sorts before the gate that triggers it. Iterate to a
+    // fixpoint instead: each pass fires only control groups that are newly
+    // eligible and not yet settled, so nothing transfers twice, but passive nodes
+    // triggered mid-step still get to act in a subsequent pass. Gate trigger
+    // emission is idempotent (set insert), so re-emitting across passes is safe.
+    let mut settled_groups: BTreeSet<(usize, TransferControl)> = BTreeSet::new();
 
-        for control in [
-            TransferControl::PullAny,
-            TransferControl::PullAll,
-            TransferControl::PushAny,
-            TransferControl::PushAll,
-        ] {
-            let Some(edge_ids) = node_groups.and_then(|groups| groups.get(&control)) else {
-                continue;
-            };
-            had_resource_groups = true;
+    loop {
+        let mut progress = false;
+        let triggers_before = triggers.nodes.len() + triggers.edges.len();
 
-            if !controller_can_fire(compiled, state, node_id, edge_ids, &triggers) {
-                continue;
-            }
+        for (node_index, node_id) in compiled.node_order.iter().enumerate() {
+            let gate_behavior = gate_behavior_for_node(compiled, node_id);
+            let mut node_acted = false;
+            let mut had_resource_groups = false;
+            let node_groups = step_plan.resource_groups_by_controller.get(node_id);
 
-            let acted = if should_use_gate_routing(compiled, node_id, control, edge_ids) {
-                apply_gate_edge_group(
-                    compiled,
-                    state,
-                    node_id,
-                    edge_ids,
-                    control,
-                    runtime,
-                    expression_cache,
-                    runtime_variables,
-                    gates,
-                    timeline,
-                    step,
-                    transfer_log,
-                )?
-            } else {
-                match control {
-                    TransferControl::PullAny | TransferControl::PushAny => apply_any_edge_group(
-                        compiled,
-                        state,
-                        edge_ids,
-                        runtime,
-                        expression_cache,
-                        runtime_variables,
-                        timeline,
-                        step,
-                        transfer_log,
-                    )?,
-                    TransferControl::PullAll | TransferControl::PushAll => apply_all_edge_group(
-                        compiled,
-                        state,
-                        edge_ids,
-                        runtime,
-                        expression_cache,
-                        runtime_variables,
-                        timeline,
-                        step,
-                        transfer_log,
-                    )?,
-                }
-            };
-
-            node_acted |= acted;
-        }
-
-        match gate_behavior {
-            GateBehavior::Mixed if node_acted => {
-                append_node_trigger_outputs(step_plan, node_id, &mut triggers);
-            }
-            GateBehavior::Trigger => {
-                let trigger_gate_acted = if had_resource_groups {
-                    node_acted
-                } else {
-                    controller_can_fire(compiled, state, node_id, &[], &triggers)
+            for control in [
+                TransferControl::PullAny,
+                TransferControl::PullAll,
+                TransferControl::PushAny,
+                TransferControl::PushAll,
+            ] {
+                let Some(edge_ids) = node_groups.and_then(|groups| groups.get(&control)) else {
+                    continue;
                 };
-                if trigger_gate_acted {
+                had_resource_groups = true;
+
+                if settled_groups.contains(&(node_index, control)) {
+                    continue;
+                }
+
+                if !controller_can_fire(compiled, state, node_id, edge_ids, &triggers) {
+                    // Not eligible yet; leave unsettled so a later pass can fire it
+                    // once a gate triggers this controller.
+                    continue;
+                }
+
+                settled_groups.insert((node_index, control));
+                progress = true;
+
+                let acted = if should_use_gate_routing(compiled, node_id, control, edge_ids) {
+                    apply_gate_edge_group(
+                        compiled,
+                        state,
+                        node_id,
+                        edge_ids,
+                        control,
+                        runtime,
+                        expression_cache,
+                        runtime_variables,
+                        gates,
+                        timeline,
+                        step,
+                        transfer_log,
+                    )?
+                } else {
+                    match control {
+                        TransferControl::PullAny | TransferControl::PushAny => {
+                            apply_any_edge_group(
+                                compiled,
+                                state,
+                                edge_ids,
+                                runtime,
+                                expression_cache,
+                                runtime_variables,
+                                timeline,
+                                step,
+                                transfer_log,
+                            )?
+                        }
+                        TransferControl::PullAll | TransferControl::PushAll => {
+                            apply_all_edge_group(
+                                compiled,
+                                state,
+                                edge_ids,
+                                runtime,
+                                expression_cache,
+                                runtime_variables,
+                                timeline,
+                                step,
+                                transfer_log,
+                            )?
+                        }
+                    }
+                };
+
+                node_acted |= acted;
+            }
+
+            match gate_behavior {
+                GateBehavior::Mixed if node_acted => {
                     append_node_trigger_outputs(step_plan, node_id, &mut triggers);
                 }
+                GateBehavior::Trigger => {
+                    let trigger_gate_acted = if had_resource_groups {
+                        node_acted
+                    } else {
+                        controller_can_fire(compiled, state, node_id, &[], &triggers)
+                    };
+                    if trigger_gate_acted {
+                        append_node_trigger_outputs(step_plan, node_id, &mut triggers);
+                    }
+                }
+                GateBehavior::None | GateBehavior::Sorting | GateBehavior::Mixed => {}
             }
-            GateBehavior::None | GateBehavior::Sorting | GateBehavior::Mixed => {}
+        }
+
+        // A gate may emit triggers without any group settling in the same pass
+        // (e.g. a pure TriggerGate). Newly added triggers are also progress: they
+        // may enable a controller that sorts earlier in `node_order`, which can
+        // only be revisited on a subsequent pass.
+        let triggers_grew = triggers.nodes.len() + triggers.edges.len() > triggers_before;
+        if !progress && !triggers_grew {
+            break;
         }
     }
 
@@ -2561,6 +2597,56 @@ mod tests {
         let report = run_single(&compiled, &config).expect("run should succeed");
 
         assert_eq!(report.final_node_values.get(&actor), Some(&2.0));
+        assert_eq!(report.final_node_values.get(&sink), Some(&1.0));
+    }
+
+    #[test]
+    fn run_single_trigger_gate_fires_passive_target_sorted_before_gate() {
+        // `actor` sorts before `gate` in node_order (alphabetical). The gate is a
+        // TriggerGate that emits a state trigger to `actor` mid-step. A single
+        // forward pass would skip `actor` before the gate emits its trigger; the
+        // fixpoint pass must let `actor` fire in the same step.
+        let actor = NodeId::fixture("actor");
+        let gate = NodeId::fixture("gate");
+        let sink = NodeId::fixture("sink");
+
+        let mut scenario = ScenarioSpec::new(ScenarioId::fixture("scenario-gate-trigger-order"))
+            .with_node(pool_with_mode("actor", 5.0, TriggerMode::Passive, ActionMode::PushAny))
+            .with_node(NodeSpec::new(gate.clone(), NodeKind::TriggerGate))
+            .with_node(NodeSpec::new(sink.clone(), NodeKind::Pool))
+            .with_edge(EdgeSpec::new(
+                EdgeId::fixture("resource-edge"),
+                actor.clone(),
+                sink.clone(),
+                TransferSpec::Fixed { amount: 1.0 },
+            ))
+            .with_edge(
+                EdgeSpec::new(
+                    EdgeId::fixture("state-trigger"),
+                    gate,
+                    actor.clone(),
+                    TransferSpec::Remaining,
+                )
+                .with_connection(EdgeConnectionConfig {
+                    kind: ConnectionKind::State,
+                    resource: Default::default(),
+                    state: StateConnectionConfig {
+                        role: StateConnectionRole::Trigger,
+                        formula: "*".to_string(),
+                        target: StateConnectionTarget::Node,
+                        target_connection: None,
+                        resource_filter: None,
+                    },
+                }),
+            );
+        scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 1 }];
+
+        let compiled = compile_scenario(&scenario).expect("scenario should compile");
+        let config = RunConfig { seed: 11, max_steps: 5, capture: CaptureConfig::disabled() };
+        let report = run_single(&compiled, &config).expect("run should succeed");
+
+        // Without the fixpoint pass `actor` would stay at 5.0 and `sink` at 0.0.
+        assert_eq!(report.final_node_values.get(&actor), Some(&4.0));
         assert_eq!(report.final_node_values.get(&sink), Some(&1.0));
     }
 

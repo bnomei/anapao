@@ -1,5 +1,5 @@
 DEVANA-FINDING: v1
-Priority: P1 | Confidence: high | Security-sensitive: no | Status: open
+Priority: P1 | Confidence: high | Security-sensitive: no | Status: fixed
 Location: src/engine/mod.rs:829 | Slug: gate-trigger-missed-same-step-passive
 
 # Gate-emitted triggers skip earlier passive targets in the same step
@@ -48,6 +48,7 @@ After working this report, preserve the original finding body. Update line 2 `St
 ## Status Notes
 
 - 2026-06-25: open by Devana. Initial report written from static source inspection.
+- 2026-06-27: fixed. Confirmed `apply_edge_transfers` made a single forward pass over `node_order`, so a gate appending trigger outputs (`append_node_trigger_outputs`) could not activate a passive controller sorted earlier. Because triggers only grow within a step (monotonic, append-only), reworked the pass into a fixpoint loop: each iteration fires only control groups that are newly eligible and not yet settled (tracked by `(node_index, control)` in `settled_groups`), so no group transfers twice, but passive nodes triggered mid-step act on a later pass. The loop continues while a group settled OR the trigger set grew (the latter is needed for pure TriggerGates that emit without settling a group of their own). Gate trigger emission is idempotent (set insert), so re-emitting across passes is safe. Termination: each productive pass settles a new group or grows the trigger set, both finite. Added regression test `run_single_trigger_gate_fires_passive_target_sorted_before_gate` (the report's counterexample: actor sorts before a TriggerGate and now fires in-step). Full `cargo test` green (245 lib tests).
 
 DEVANA-KEY: src/engine/mod.rs:829 | P1 | gate-trigger-missed-same-step-passive
-DEVANA-SUMMARY: Status=open | P1 high src/engine/mod.rs:829 - TriggerGate outputs appended mid-step cannot activate passive nodes already visited earlier in node_order.
+DEVANA-SUMMARY: Status=fixed | P1 high src/engine/mod.rs:829 - TriggerGate outputs appended mid-step cannot activate passive nodes already visited earlier in node_order. Fixed by iterating apply_edge_transfers to a fixpoint over the monotonically-growing trigger set; regression test added.
