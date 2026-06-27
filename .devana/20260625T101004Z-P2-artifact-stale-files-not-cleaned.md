@@ -1,5 +1,5 @@
 DEVANA-FINDING: v1
-Priority: P2 | Confidence: high | Security-sensitive: no | Status: open
+Priority: P2 | Confidence: high | Security-sensitive: no | Status: fixed
 Location: src/artifact/mod.rs:202 | Slug: artifact-stale-files-not-cleaned
 
 # Artifact pack written into a reused directory leaves stale files inconsistent with its manifest
@@ -53,6 +53,7 @@ After working this report, preserve the original finding body. Update line 2 `St
 ## Status Notes
 
 - 2026-06-25: open by Devana. Initial report written from static source inspection.
+- 2026-06-27: fixed. Confirmed `ensure_output_dir` only `create_dir_all`'d and no writer ever removed files. Added an `ARTIFACT_FILES` constant listing all 9 possible artifact filenames and made `ensure_output_dir` (called by every write entry point) remove each from the target directory after creating it, ignoring `NotFound` and surfacing other IO errors. Chose to purge only the known artifact names rather than `remove_dir_all`, so unrelated files a caller placed in the directory are preserved (the functions accept arbitrary output_dir). Manifest is still written last, so the previous single-write atomicity is unchanged. Added regression test `rewriting_into_reused_directory_purges_stale_artifacts` covering both the report's cases (same-kind: stale assertions.json removed when re-writing without assertions; cross-kind: stale prediction.json + summary.csv removed when a run pack overwrites a batch pack) and asserting the on-disk file set equals the manifest's declared artifacts. Full `cargo test` green.
 
 DEVANA-KEY: src/artifact/mod.rs:202 | P2 | artifact-stale-files-not-cleaned
-DEVANA-SUMMARY: Status=open | P2 high src/artifact/mod.rs:202 - ensure_output_dir only create_dir_all's, so re-writing a pack into a reused directory leaves stale files the new manifest no longer references.
+DEVANA-SUMMARY: Status=fixed | P2 high src/artifact/mod.rs:202 - ensure_output_dir only create_dir_all'd, so re-writing a pack into a reused directory left stale files the new manifest no longer referenced. Fixed by purging known artifact files in ensure_output_dir; regression test added.

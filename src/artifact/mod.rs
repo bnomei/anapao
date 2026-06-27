@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::{BufWriter, Write};
+use std::io::{self, BufWriter, Write};
 use std::path::Path;
 
 use serde::Serialize;
@@ -24,6 +24,21 @@ const REPLAY_FILE: &str = "replay.json";
 const SERIES_FILE: &str = "series.csv";
 const SUMMARY_FILE: &str = "summary.csv";
 const PREDICTION_FILE: &str = "prediction.json";
+
+/// Every file an artifact write may emit. `ensure_output_dir` removes these from a
+/// reused directory before writing so the resulting pack matches the manifest
+/// exactly instead of accumulating stale files across writes.
+const ARTIFACT_FILES: [&str; 9] = [
+    MANIFEST_FILE,
+    EVENTS_FILE,
+    VARIABLES_FILE,
+    ASSERTIONS_FILE,
+    HISTORY_FILE,
+    REPLAY_FILE,
+    SERIES_FILE,
+    SUMMARY_FILE,
+    PREDICTION_FILE,
+];
 
 const CONTENT_TYPE_JSON: &str = "application/json";
 const CONTENT_TYPE_JSONL: &str = "application/x-ndjson";
@@ -201,7 +216,24 @@ fn artifact_ref(kind: ArtifactKind, path: &str, content_type: &str) -> ArtifactR
 
 fn ensure_output_dir(output_dir: &Path) -> Result<(), ArtifactError> {
     fs::create_dir_all(output_dir)
-        .map_err(|source| ArtifactError::io(path_to_string(output_dir), source))
+        .map_err(|source| ArtifactError::io(path_to_string(output_dir), source))?;
+
+    // Purge any artifact files left by a previous write into this same directory.
+    // Each writer truncate-overwrites only the names it emits, so without this a
+    // reused directory becomes a union of stale + fresh files (e.g. a leftover
+    // assertions.json or batch prediction.json) that the new manifest no longer
+    // references. Only the known artifact names are removed, so unrelated files a
+    // caller placed in the directory are left untouched.
+    for file in ARTIFACT_FILES {
+        let path = output_dir.join(file);
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => return Err(ArtifactError::io(path_to_string(&path), source)),
+        }
+    }
+
+    Ok(())
 }
 
 fn write_manifest_json(path: &Path, manifest: &ManifestRef) -> Result<(), ArtifactError> {
@@ -1088,6 +1120,51 @@ mod tests {
 
         let assertions_path = tempdir.path().join(ASSERTIONS_FILE);
         assert!(assertions_path.is_file());
+    }
+
+    #[test]
+    fn rewriting_into_reused_directory_purges_stale_artifacts() {
+        let tempdir = tempdir().expect("tempdir");
+        let dir = tempdir.path();
+
+        // Same-kind: a write with assertions leaves assertions.json; a later write
+        // without assertions must not leave it behind.
+        let run_report = RunReport::new(ScenarioId::fixture("scenario-run"), 7);
+        let events = vec![RunEvent::step_start("run-1", 0, 0, StepStartEvent { seed: 7 })];
+        let assertions = AssertionReport { total: 0, passed: 0, failed: 0, results: vec![] };
+        write_run_artifacts_with_assertions(dir, &run_report, &events, Some(&assertions))
+            .expect("write with assertions");
+        assert!(dir.join(ASSERTIONS_FILE).is_file());
+
+        let manifest = write_run_artifacts(dir, &run_report, &events).expect("rewrite without");
+        assert!(!manifest.artifacts.contains_key("assertions"));
+        assert!(!dir.join(ASSERTIONS_FILE).exists(), "stale assertions.json must be purged");
+
+        // Cross-kind: batch artifacts leave prediction.json + summary.csv; a run
+        // write into the same directory must not leave those batch-only files.
+        let batch_report =
+            BatchReport::new(ScenarioId::fixture("scenario-batch"), 2, ExecutionMode::SingleThread);
+        write_batch_artifacts(dir, &batch_report).expect("write batch");
+        assert!(dir.join(PREDICTION_FILE).is_file());
+        assert!(dir.join(SUMMARY_FILE).is_file());
+
+        let manifest = write_run_artifacts(dir, &run_report, &events).expect("rewrite as run");
+        assert!(!dir.join(PREDICTION_FILE).exists(), "stale prediction.json must be purged");
+        assert!(!dir.join(SUMMARY_FILE).exists(), "stale summary.csv must be purged");
+
+        // The on-disk file set equals the manifest's declared artifacts.
+        let mut on_disk = fs::read_dir(dir)
+            .expect("read dir")
+            .map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        on_disk.sort();
+        let mut declared = manifest
+            .artifacts
+            .values()
+            .map(|artifact| artifact.path.clone())
+            .collect::<Vec<_>>();
+        declared.sort();
+        assert_eq!(on_disk, declared);
     }
 
     #[test]
