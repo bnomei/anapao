@@ -1,4 +1,10 @@
-//! Deterministic simulation engine internals.
+//! Step engine that advances a compiled scenario under a seeded run config.
+//!
+//! Owns per-run state (node values, metrics, variables, delays/queues), evaluates
+//! edges and expressions, applies capacity/backpressure rules, samples stochastic
+//! variable and gate draws from salted RNGs, and optionally streams ordered run
+//! events. Callers should prefer [`crate::Simulator`]; this module is the
+//! execution core used by single-run and batch paths.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -26,7 +32,7 @@ const VARIABLE_RNG_SALT: u64 = 0xA11C_E5E0_0023_0001;
 const GATE_RNG_SALT: u64 = 0xA11C_E5E0_0023_0002;
 
 #[derive(Debug, Clone, PartialEq)]
-/// Mutable execution state for one run.
+/// Mutable step-local inventory for one run: step counter, node values, metrics.
 pub struct EngineState {
     pub step: u64,
     pub node_values: Vec<f64>,
@@ -461,7 +467,7 @@ fn sample_variable_source(source: &VariableSourceSpec, rng: &mut BaseRng) -> Opt
     }
 }
 
-/// Initializes engine state from compiled scenario defaults.
+/// Builds initial engine state from compiled node defaults and tracked metrics.
 pub fn init_state(compiled: &CompiledScenario) -> EngineState {
     let node_values = compiled
         .node_order
@@ -489,13 +495,13 @@ pub fn init_state(compiled: &CompiledScenario) -> EngineState {
     state
 }
 
-/// Runs one deterministic simulation from initial state to completion.
+/// Advances one run from init to completion without streaming events.
 pub fn run_single(compiled: &CompiledScenario, config: &RunConfig) -> Result<RunReport, RunError> {
     let mut emit = |_event: RunEvent| Ok(());
     run_single_internal(compiled, config, "run-0", false, &mut emit)
 }
 
-/// Runs one deterministic simulation and streams run events while execution progresses.
+/// Advances one run while pushing live events to `sink` as steps progress.
 pub(crate) fn run_single_streaming(
     compiled: &CompiledScenario,
     config: &RunConfig,
@@ -506,10 +512,10 @@ pub(crate) fn run_single_streaming(
     run_single_internal(compiled, config, run_id, false, &mut emit)
 }
 
-/// Runs one deterministic simulation and streams run events while deferring the terminal step_end.
+/// Streams run events but defers the terminal `step_end` for assertion interleaving.
 ///
-/// Intended for `run_with_assertions`, where assertion checkpoints should be emitted at the
-/// terminal step before emitting the final `step_end`.
+/// Used by `Simulator::run_with_assertions*` so checkpoints land at the terminal
+/// step before the final `step_end`.
 pub(crate) fn run_single_streaming_for_assertions(
     compiled: &CompiledScenario,
     config: &RunConfig,
@@ -813,6 +819,14 @@ struct EdgeTransferPlan {
     transfer: f64,
 }
 
+/// Applies resource transfers for one step, iterating control groups to a fixpoint.
+///
+/// A single forward pass over `node_order` cannot fire a passive controller that
+/// sorts *before* the gate that triggers it mid-step. Triggers only grow within a
+/// step and emission is idempotent (`BTreeSet` insert), so each pass settles newly
+/// eligible groups without double-transferring already settled ones. Pure
+/// TriggerGates can add triggers without settling a group; trigger growth alone
+/// counts as progress so earlier controllers can be revisited.
 #[allow(clippy::too_many_arguments)]
 fn apply_edge_transfers(
     compiled: &CompiledScenario,
@@ -827,14 +841,6 @@ fn apply_edge_transfers(
     transfer_log: &mut Vec<TransferRecord>,
 ) -> Result<(), RunError> {
     let mut triggers = collect_step_triggers(compiled, step_plan, state);
-
-    // Triggers only ever grow within a step (gates append targets, never remove
-    // them), so a single forward pass over `node_order` cannot activate a passive
-    // controller that sorts before the gate that triggers it. Iterate to a
-    // fixpoint instead: each pass fires only control groups that are newly
-    // eligible and not yet settled, so nothing transfers twice, but passive nodes
-    // triggered mid-step still get to act in a subsequent pass. Gate trigger
-    // emission is idempotent (set insert), so re-emitting across passes is safe.
     let mut settled_groups: BTreeSet<(usize, TransferControl)> = BTreeSet::new();
 
     loop {
@@ -863,8 +869,6 @@ fn apply_edge_transfers(
                 }
 
                 if !controller_can_fire(compiled, state, node_id, edge_ids, &triggers) {
-                    // Not eligible yet; leave unsettled so a later pass can fire it
-                    // once a gate triggers this controller.
                     continue;
                 }
 
@@ -938,10 +942,6 @@ fn apply_edge_transfers(
             }
         }
 
-        // A gate may emit triggers without any group settling in the same pass
-        // (e.g. a pure TriggerGate). Newly added triggers are also progress: they
-        // may enable a controller that sorts earlier in `node_order`, which can
-        // only be revisited on a subsequent pass.
         let triggers_grew = triggers.nodes.len() + triggers.edges.len() > triggers_before;
         if !progress && !triggers_grew {
             break;
@@ -988,6 +988,10 @@ fn apply_any_edge_group(
     Ok(acted)
 }
 
+/// All-or-nothing transfer group: skips zero-request edges instead of aborting.
+///
+/// `None` from planning means a trivially empty request (zero fraction / scaled),
+/// not failure. Atomicity is still enforced over the remaining non-zero plans.
 #[allow(clippy::too_many_arguments)]
 fn apply_all_edge_group(
     compiled: &CompiledScenario,
@@ -1020,11 +1024,6 @@ fn apply_all_edge_group(
             from_available_override,
         )?
         else {
-            // A zero-request edge (e.g. Fraction { numerator: 0 } or a currently
-            // zero MetricScaled) is trivially satisfiable and contributes no
-            // transfer. Skip it like the "Any" path does, rather than aborting the
-            // whole all-or-nothing group; the availability check below still
-            // enforces atomicity over the genuinely non-zero requests.
             continue;
         };
 
@@ -1208,6 +1207,10 @@ fn apply_gate_edge_group(
     Ok(acted)
 }
 
+/// Builds weighted routing lanes; zero/non-finite weights skip that lane only.
+///
+/// Skipping a dead lane keeps the remaining weights usable. Returning `None` for
+/// the whole group would fall back to flat dispatch and change gate outcomes.
 fn gate_routing_for_group(
     compiled: &CompiledScenario,
     state: &EngineState,
@@ -1245,10 +1248,6 @@ fn gate_routing_for_group(
             runtime_variables,
         )?
         else {
-            // A zero-weight (e.g. `Fraction { numerator: 0 }`) or non-finite lane
-            // contributes no routing probability. Skip just this lane so the
-            // remaining lanes still route weighted, instead of aborting the whole
-            // gate group back to a flat dispatch.
             continue;
         };
         if weight <= 0.0 {
@@ -1450,8 +1449,6 @@ fn apply_transfer_plan(
     step: u64,
     transfer_log: &mut Vec<TransferRecord>,
 ) {
-    // Clip the amount actually moved so a capacity-bounded target (Pool or Queue)
-    // cannot overflow its capacity; the unaccepted remainder stays at the source.
     let transfer = accepted_arrival(compiled, state, plan.to_index, plan.transfer);
 
     if let Some(value) = state.node_values.get_mut(plan.from_index) {
@@ -1964,13 +1961,12 @@ fn node_value(compiled: &CompiledScenario, state: &EngineState, node_id: &NodeId
     state.node_values.get(index).copied().unwrap_or(0.0)
 }
 
+/// Resolves a metric for edge evaluation using live node values, not the end-of-step cache.
+///
+/// `state.metrics` is only refreshed via `refresh_metrics` after the step, so
+/// reading it mid-step would stale `MetricScaled` transfers and gate weights that
+/// depend on earlier edges in the same step.
 fn metric_value(compiled: &CompiledScenario, state: &EngineState, metric: &MetricKey) -> f64 {
-    // Prefer live simulation state so intra-step transfers (`MetricScaled`) and
-    // metric-derived gate weights observe the effect of earlier edges in the
-    // same step. `state.metrics` is only refreshed at the end of each step via
-    // `refresh_metrics`, so reading the cache first would return stale
-    // start-of-step values during edge evaluation. This mirrors the value that
-    // `refresh_metrics` would compute for the metric.
     if let Some(index) = metric_node_index(compiled, metric) {
         return canonicalize_float(state.node_values.get(index).copied().unwrap_or(0.0));
     }
@@ -2237,9 +2233,6 @@ mod tests {
 
     #[test]
     fn run_single_metric_scaled_edges_observe_intra_step_updates() {
-        // Two metric-scaled edges in the same step, both keyed on `sink-a`.
-        // The first edge raises `sink-a`; the second must observe the updated
-        // value, not the stale start-of-step metric cache.
         let source = NodeId::fixture("source");
         let sink_a = NodeId::fixture("sink-a");
         let sink_b = NodeId::fixture("sink-b");
@@ -2268,8 +2261,6 @@ mod tests {
         let config = RunConfig { seed: 1, max_steps: 5, capture: CaptureConfig::disabled() };
         let report = run_single(&compiled, &config).expect("run should succeed");
 
-        // edge-1: metric sink-a = 4 -> transfer 4, sink-a becomes 8.
-        // edge-2: metric sink-a = 8 (live) -> transfer 8 to sink-b.
         assert_eq!(report.final_node_values.get(&sink_a), Some(&8.0));
         assert_eq!(report.final_node_values.get(&sink_b), Some(&8.0));
         assert_eq!(report.final_node_values.get(&source), Some(&8.0));
@@ -2303,12 +2294,6 @@ mod tests {
 
     #[test]
     fn run_single_sorting_gate_skips_zero_fraction_lane_keeps_weighted_routing() {
-        // A SortingGate with a 50% lane and a 0% (Fraction { numerator: 0 }) lane.
-        // The zero lane must be skipped, not abort weighted routing. With per-token
-        // gate routing the deterministic balancer sends 2 of 4 tokens to sink-a and
-        // implicitly drops the other 2, leaving the gate empty. If the zero lane
-        // aborted routing, the engine would fall back to flat dispatch and the gate
-        // would retain the untransferred tokens.
         let gate = NodeId::fixture("gate");
         let sink_a = NodeId::fixture("sink-a");
         let sink_b = NodeId::fixture("sink-b");
@@ -2339,15 +2324,11 @@ mod tests {
 
         assert_eq!(report.final_node_values.get(&sink_a), Some(&2.0));
         assert_eq!(report.final_node_values.get(&sink_b), Some(&0.0));
-        // Gate emptied: 2 tokens routed to sink-a, 2 dropped by the implicit lane.
         assert_eq!(report.final_node_values.get(&gate), Some(&0.0));
     }
 
     #[test]
     fn run_single_push_all_group_skips_zero_request_edge() {
-        // PushAll node A with a fundable Fixed edge and a zero-request Fraction
-        // edge. The zero edge is trivially satisfiable and must not abort the
-        // group: A->B should still transfer 2.
         let node_a = NodeId::fixture("a-source");
         let node_b = NodeId::fixture("b-sink");
         let node_c = NodeId::fixture("c-sink");
@@ -2374,7 +2355,6 @@ mod tests {
         let config = RunConfig { seed: 12, max_steps: 5, capture: CaptureConfig::disabled() };
         let report = run_single(&compiled, &config).expect("run should succeed");
 
-        // Without the fix neither transfer fires (A stays 10, B stays 0).
         assert_eq!(report.final_node_values.get(&node_a), Some(&8.0));
         assert_eq!(report.final_node_values.get(&node_b), Some(&2.0));
         assert_eq!(report.final_node_values.get(&node_c), Some(&0.0));
@@ -2764,10 +2744,6 @@ mod tests {
 
     #[test]
     fn run_single_trigger_gate_fires_passive_target_sorted_before_gate() {
-        // `actor` sorts before `gate` in node_order (alphabetical). The gate is a
-        // TriggerGate that emits a state trigger to `actor` mid-step. A single
-        // forward pass would skip `actor` before the gate emits its trigger; the
-        // fixpoint pass must let `actor` fire in the same step.
         let actor = NodeId::fixture("actor");
         let gate = NodeId::fixture("gate");
         let sink = NodeId::fixture("sink");
@@ -2807,7 +2783,6 @@ mod tests {
         let config = RunConfig { seed: 11, max_steps: 5, capture: CaptureConfig::disabled() };
         let report = run_single(&compiled, &config).expect("run should succeed");
 
-        // Without the fixpoint pass `actor` would stay at 5.0 and `sink` at 0.0.
         assert_eq!(report.final_node_values.get(&actor), Some(&4.0));
         assert_eq!(report.final_node_values.get(&sink), Some(&1.0));
     }
@@ -3097,7 +3072,6 @@ mod tests {
             compile_scenario(&scenario).expect("scenario should compile")
         };
 
-        // A mistyped capture metric must be rejected, not recorded as all-zeros.
         let compiled = build();
         let mut capture = CaptureConfig::default();
         capture.capture_metrics.insert(MetricKey::fixture("snk"));
@@ -3109,7 +3083,6 @@ mod tests {
             other => panic!("expected InvalidRunConfig, got {other:?}"),
         }
 
-        // An unknown capture node id must also be rejected.
         let mut capture = CaptureConfig::default();
         capture.capture_nodes.insert(NodeId::fixture("nope"));
         let config = RunConfig { seed: 1, max_steps: 5, capture };
@@ -3120,7 +3093,6 @@ mod tests {
             other => panic!("expected InvalidRunConfig, got {other:?}"),
         }
 
-        // The real tracked metric and a real node id both resolve and run fine.
         let mut capture = CaptureConfig::default();
         capture.capture_metrics.insert(metric_sink.clone());
         capture.capture_nodes.insert(sink.clone());
@@ -3130,8 +3102,6 @@ mod tests {
 
     #[test]
     fn run_single_pool_capacity_bounds_stored_value() {
-        // Pool sink with capacity 10 fed 5 units per step. Its stored value must
-        // never exceed capacity; the un-accepted remainder stays at the source.
         let source = NodeId::fixture("source");
         let pool = NodeId::fixture("pool");
 
@@ -3158,15 +3128,12 @@ mod tests {
         let config = RunConfig { seed: 34, max_steps: 10, capture: CaptureConfig::disabled() };
         let report = run_single(&compiled, &config).expect("run should succeed");
 
-        // Without enforcement the pool would hold 15 (5 per step over 3 steps).
         assert_eq!(report.final_node_values.get(&pool), Some(&10.0));
         assert_eq!(report.final_node_values.get(&source), Some(&90.0));
     }
 
     #[test]
     fn run_single_queue_capacity_bounds_held_inventory() {
-        // A capacity-2 queue fed by a source holding 5. The queue must never hold
-        // more than its capacity; the un-accepted remainder stays at the source.
         let source = NodeId::fixture("source");
         let queue = NodeId::fixture("queue");
 
@@ -3194,7 +3161,6 @@ mod tests {
         let config = RunConfig { seed: 33, max_steps: 10, capture: CaptureConfig::disabled() };
         let report = run_single(&compiled, &config).expect("run should succeed");
 
-        // Without runtime enforcement the queue would hold all 5 units.
         assert_eq!(report.final_node_values.get(&queue), Some(&2.0));
         assert_eq!(report.final_node_values.get(&source), Some(&3.0));
     }

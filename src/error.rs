@@ -1,3 +1,9 @@
+//! Layered error taxonomy for setup, run, assertion, and artifact failures.
+//!
+//! Callers usually consume [`SimError`] or [`SimResult`]. The nested enums keep
+//! failure phase explicit so CI and tooling can distinguish compile-time graph
+//! problems from runtime step limits, expectation mismatches, and filesystem I/O.
+
 use std::collections::BTreeMap;
 use std::io;
 
@@ -5,11 +11,11 @@ use thiserror::Error;
 
 use crate::types::DiagnosticSeverity;
 
-/// Top-level result type for simulation operations.
+/// Convenience alias for operations that may fail with [`SimError`].
 pub type SimResult<T> = Result<T, SimError>;
 
 #[derive(Debug, Error)]
-/// Setup-time validation failures before execution starts.
+/// Scenario compile and config validation failures before a run starts.
 pub enum SetupError {
     #[error("invalid graph reference `{reference}` in graph `{graph}`")]
     InvalidGraphReference { graph: String, reference: String },
@@ -20,7 +26,7 @@ pub enum SetupError {
 }
 
 #[derive(Debug, Error)]
-/// Runtime failures while executing a simulation run.
+/// Failures that abort a single run or batch after validation has passed.
 pub enum RunError {
     #[error("step overflow: attempted step {attempted} exceeds maximum {max}")]
     StepOverflow { attempted: u64, max: u64 },
@@ -38,14 +44,14 @@ pub enum RunError {
 }
 
 #[derive(Debug, Error)]
-/// Assertion evaluation failures.
+/// Malformed expectations or failed expectation evaluation contracts.
 pub enum AssertionError {
     #[error("expectation mismatch for `{subject}`: expected `{expected}`, got `{actual}`")]
     ExpectationMismatch { subject: String, expected: String, actual: String },
 }
 
 #[derive(Debug, Error)]
-/// Artifact read/write and serialization failures.
+/// Filesystem and serialization failures when reading or writing artifact packs.
 pub enum ArtifactError {
     #[error("artifact I/O error at `{path}`: {source}")]
     Io {
@@ -86,7 +92,7 @@ impl From<serde_json::Error> for ArtifactError {
 }
 
 #[derive(Debug, Error)]
-/// Unified error envelope for setup, run, assertion, and artifact layers.
+/// Unified public error envelope spanning setup, run, assertion, and artifact layers.
 pub enum SimError {
     #[error(transparent)]
     Setup(#[from] SetupError),

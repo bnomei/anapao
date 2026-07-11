@@ -6,7 +6,12 @@
 // This file is part of Anapao and is proprietary software.
 // Unauthorized copying, modification, or distribution is prohibited.
 
-//! Anapao — deterministic simulation testing utility.
+//! Anapao — library-only deterministic simulation testing utility.
+//!
+//! Compile a declarative [`ScenarioSpec`], run seeded single simulations or Monte
+//! Carlo batches, evaluate typed [`Expectation`]s, and persist CI-friendly artifact
+//! packs. Prefer [`Simulator`] as the public entrypoint; lower-level modules own
+//! the engine, events, validation, and writers.
 //!
 //! ## Concepts
 //! - `ScenarioSpec`: declarative simulation graph (nodes, edges, end conditions, metrics).

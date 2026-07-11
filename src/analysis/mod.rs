@@ -1,3 +1,9 @@
+//! Optional Polars adapters that reshape run/batch series into analysis frames.
+//!
+//! Enabled by the `analysis-polars` feature. Frames use stable column names
+//! (`metric`, `step`, `value`, and batch `run_index`) for plotting and notebooks
+//! without reimplementing series traversal.
+
 use std::collections::BTreeMap;
 
 use polars::prelude::{Column, DataFrame, PolarsResult};

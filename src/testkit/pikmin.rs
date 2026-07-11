@@ -1,4 +1,7 @@
-//! Typed Pikmin fixture builders and profile presets for integration tests.
+//! Pikmin-themed scenario builders and named difficulty profiles for integration tests.
+//!
+//! Canonical node/metric helpers keep diagram fixtures aligned with the public
+//! Pikmin playbook tests without hard-coding string ids in every test body.
 
 use std::collections::BTreeMap;
 

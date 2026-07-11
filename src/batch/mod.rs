@@ -1,4 +1,9 @@
-//! Batch execution orchestration and aggregation helpers.
+//! Deterministic Monte Carlo batch orchestration and series aggregation.
+//!
+//! Derives per-run seeds from a batch `base_seed`, executes runs sequentially or
+//! via Rayon when the `parallel` feature is enabled, then folds per-run series into
+//! ordered aggregate tables. Without `parallel`, a requested Rayon mode falls back
+//! to single-thread execution so reports remain reproducible.
 
 use std::collections::BTreeMap;
 
@@ -17,7 +22,10 @@ struct IndexedRunReport {
     report: RunReport,
 }
 
-/// Executes deterministic multi-run simulation and aggregates run outputs.
+/// Executes all batch runs and returns summaries plus step-aligned aggregate series.
+///
+/// `completed_runs` counts produced run summaries, not how many runs set
+/// `completed == true` on their individual reports.
 pub fn run_batch(
     compiled: &CompiledScenario,
     config: &BatchConfig,
@@ -41,7 +49,6 @@ pub fn run_batch(
     Ok(BatchReport {
         scenario_id: compiled.scenario.id.clone(),
         requested_runs: config.runs,
-        // `completed_runs` tracks how many run summaries are present in the report payload.
         completed_runs: runs.len() as u64,
         execution_mode,
         runs,

@@ -1,3 +1,9 @@
+//! Output report shapes for single runs, batch summaries, and time series.
+//!
+//! These structs are the primary in-memory results returned by [`crate::Simulator`]
+//! and the inputs consumed by assertions and artifact writers. Series and
+//! snapshots use ordered maps/vecs so equal seeds produce equal byte-stable JSON.
+
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -5,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use super::{EdgeId, ExecutionMode, ManifestRef, MetricKey, NodeId, ScenarioId};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-/// Captured node values at a specific simulation step.
+/// Node inventory values captured at one simulation step.
 pub struct NodeSnapshot {
     pub step: u64,
     pub values: BTreeMap<NodeId, f64>,
@@ -74,7 +80,7 @@ impl SeriesTable {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-/// Result of one deterministic simulation run.
+/// Full outcome of one seeded run: steps, snapshots, transfers, series, and finals.
 pub struct RunReport {
     pub scenario_id: ScenarioId,
     pub seed: u64,
@@ -109,7 +115,7 @@ impl RunReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-/// Reduced per-run payload used by batch reports.
+/// Compact per-run row retained inside a [`BatchReport`].
 pub struct BatchRunSummary {
     pub run_index: u64,
     pub seed: u64,
@@ -131,12 +137,12 @@ pub struct TransferRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-/// Aggregated output of a multi-run batch execution.
+/// Monte Carlo batch outcome: per-run summaries and step-aligned aggregate series.
 pub struct BatchReport {
     pub scenario_id: ScenarioId,
-    /// Number of runs requested in the input batch configuration.
+    /// Requested run count from [`super::BatchConfig::runs`].
     pub requested_runs: u64,
-    /// Number of run summaries present in `runs` (not the count of `run.completed == true`).
+    /// Number of summaries in `runs` (not how many runs finished with `completed == true`).
     pub completed_runs: u64,
     pub execution_mode: ExecutionMode,
     pub runs: Vec<BatchRunSummary>,

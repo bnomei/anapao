@@ -1,3 +1,10 @@
+//! Manifest, prediction, history, and replay types for CI-friendly artifact packs.
+//!
+//! [`ManifestRef`] is the machine-readable index written as `manifest.json`.
+//! Schema v2 is the write default; readers accept older payloads via
+//! [`ManifestRef::upgrade_compat`]. Prediction and history types back the optional
+//! accuracy/debug sections linked from the manifest.
+
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -6,7 +13,7 @@ use super::{ConfidenceLevel, MetricKey, ScenarioId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-/// Artifact type labels used in manifests.
+/// Kind tag for one file referenced by a [`ManifestRef`].
 pub enum ArtifactKind {
     Manifest,
     EventLog,

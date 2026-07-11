@@ -1,4 +1,7 @@
-//! Deterministic summary statistics utilities for simulation outputs.
+//! Deterministic descriptive stats and prediction indicators for metric samples.
+//!
+//! Used by batch artifact writers and accuracy reporting. Non-finite samples are
+//! dropped or reject a summary rather than poisoning means and percentiles.
 
 use std::collections::BTreeMap;
 

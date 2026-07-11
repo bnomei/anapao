@@ -1,7 +1,8 @@
-//! Event model and sink traits for run/batch diagnostics.
+//! Typed run events, deterministic ordering keys, and event-sink adapters.
 //!
-//! This module defines typed run events, deterministic ordering helpers,
-//! and sink abstractions used by simulator and artifact layers.
+//! Events are ordered by run id, step, phase, and ordinal so live streams and
+//! `events.jsonl` artifacts stay comparable across seeds. Prefer
+//! [`VecEventSink`] in tests; implement [`EventSink`] for file or channel sinks.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -12,7 +13,7 @@ use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-/// Canonical phase ordering for one run step.
+/// Lifecycle phase within a step; variant order is the sort key within that step.
 pub enum RunEventPhase {
     StepStart,
     NodeUpdate,
@@ -25,7 +26,7 @@ pub enum RunEventPhase {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-/// Stable ordering key for a single event in a run timeline.
+/// Total order key: run id → step → phase → ordinal.
 pub struct RunEventOrder {
     pub run_id: String,
     pub step: u64,
@@ -125,7 +126,7 @@ pub struct ViolationEvent {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
-/// Tagged run event envelope with typed payloads.
+/// Tagged diagnostic event emitted during a run or batch summary stream.
 pub enum RunEvent {
     StepStart { order: RunEventOrder, payload: StepStartEvent },
     StepEnd { order: RunEventOrder, payload: StepEndEvent },
@@ -320,19 +321,22 @@ impl EventSinkError {
     }
 }
 
-/// Consumer trait for run events emitted by simulator workflows.
+/// Streaming consumer for ordered [`RunEvent`]s from simulator workflows.
+///
+/// Implementations must not reorder events relative to push order if they want
+/// to preserve the engine's monotonic stream contract.
 pub trait EventSink {
-    /// Pushes one event into the sink.
+    /// Accepts one event in stream order.
     fn push(&mut self, event: RunEvent) -> Result<(), EventSinkError>;
 
-    /// Flushes pending buffered events, if needed.
+    /// Finalizes buffered output after a run or batch completes.
     fn flush(&mut self) -> Result<(), EventSinkError> {
         Ok(())
     }
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
-/// In-memory sink collecting events in insertion order.
+/// In-memory sink retaining events in push order for tests and artifact capture.
 pub struct VecEventSink {
     events: Vec<RunEvent>,
 }

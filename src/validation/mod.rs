@@ -1,3 +1,11 @@
+//! Scenario compile pipeline and run/batch config validation gates.
+//!
+//! [`compile_scenario`] rejects broken graphs (missing endpoints, resource cycles,
+//! invalid node configs, bad variable sources) and returns a
+//! [`CompiledScenario`] with stable BTreeMap-derived iteration indexes. Run and
+//! batch configs are checked separately so execution never starts with zero step
+//! budgets or empty capture strides.
+
 use std::collections::BTreeMap;
 
 use crate::error::SetupError;
@@ -9,7 +17,10 @@ use crate::types::{
     TransferSpec, VariableSourceSpec,
 };
 
-/// Compiled scenario representation with deterministic node/edge iteration indexes.
+/// Validated scenario plus ordered node/edge indexes for deterministic execution.
+///
+/// Indexes follow `BTreeMap` key order of the original spec so equal specs compile
+/// to equal layouts across platforms.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompiledScenario {
     pub scenario: ScenarioSpec,
@@ -20,7 +31,11 @@ pub struct CompiledScenario {
     pub metric_index_by_name: BTreeMap<String, usize>,
 }
 
-/// Compiles a scenario into deterministic index structures and validates structural invariants.
+/// Validates structural invariants and builds deterministic iteration indexes.
+///
+/// # Errors
+/// Returns [`SetupError`] for missing graph references, resource cycles, invalid
+/// parameters, or end-condition/metric reference failures.
 pub fn compile_scenario(spec: &ScenarioSpec) -> Result<CompiledScenario, SetupError> {
     for (edge_id, edge) in &spec.edges {
         if !spec.nodes.contains_key(&edge.from) {
@@ -86,12 +101,12 @@ pub fn compile_scenario(spec: &ScenarioSpec) -> Result<CompiledScenario, SetupEr
     })
 }
 
-/// Validates run-level configuration before execution.
+/// Rejects zero `max_steps` or zero capture strides on a [`RunConfig`].
 pub fn validate_run_config(config: &RunConfig) -> Result<(), SetupError> {
     validate_run_config_with_prefix(config, "run")
 }
 
-/// Validates batch-level configuration before execution.
+/// Rejects zero batch runs and invalid nested run-template limits.
 pub fn validate_batch_config(config: &BatchConfig) -> Result<(), SetupError> {
     if config.runs == 0 {
         return Err(SetupError::InvalidParameter {
@@ -431,6 +446,9 @@ fn validate_resource_connection_invariants(
     Ok(())
 }
 
+/// Checks state-connection shape. Rejects Modifier → Delay/Queue: modifiers write
+/// node values without timeline `record_arrival`/`record_release`, which desyncs
+/// scheduled tokens from physical inventory.
 fn validate_state_connection_invariants(
     spec: &ScenarioSpec,
     edge_id: &EdgeId,
@@ -486,11 +504,6 @@ fn validate_state_connection_invariants(
                 });
             }
 
-            // A Modifier edge mutates the target node's value directly, bypassing
-            // `record_arrival`/`record_release`. For Delay/Queue nodes that desyncs
-            // the physical value from the timeline schedule (release budgets are
-            // built only from scheduled tokens), stranding injected tokens or
-            // leaving phantom scheduled tokens. Reject rather than silently corrupt.
             if matches!(state.role, StateConnectionRole::Modifier) {
                 if let Some(target) = spec.nodes.get(&edge.to) {
                     if matches!(target.kind, NodeKind::Delay | NodeKind::Queue) {
@@ -934,7 +947,6 @@ mod tests {
             }
         }
 
-        // A valid source still compiles.
         let mut spec = base();
         spec.variables
             .sources

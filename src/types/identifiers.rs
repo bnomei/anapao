@@ -1,10 +1,16 @@
+//! Validated identifier newtypes for scenarios, nodes, edges, and metrics.
+//!
+//! Wrappers reject empty and control-character values so persisted graphs and
+//! artifact keys stay printable and non-blank. Fixture constructors panic on
+//! invalid input so tests can use stable string literals without bubbling errors.
+
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-/// Validation errors for strongly-typed identifier wrappers.
+/// Rejected empty or control-character identifier values.
 pub enum IdentifierError {
     #[error("{kind} cannot be empty")]
     Empty { kind: &'static str },

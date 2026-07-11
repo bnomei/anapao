@@ -1,4 +1,8 @@
-//! Deterministic expression parsing and evaluation runtime.
+//! Deterministic arithmetic expression parse/eval used by transfers and state formulas.
+//!
+//! Expressions resolve named variables from engine or connection contexts. The
+//! runtime is pure given the same expression text and variable map; non-finite
+//! results and division by zero are hard errors rather than silent NaNs.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -28,7 +32,7 @@ pub enum ExprError {
 }
 
 #[derive(Debug, Clone, Default)]
-/// Stateless runtime for evaluating arithmetic expressions.
+/// Pure expression evaluator; holds no mutable caches across calls.
 pub struct ExprRuntime;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -637,11 +641,7 @@ fn eval_call(
         "min" => binary("min", &evaluated, f64::min),
         "max" => binary("max", &evaluated, f64::max),
         "pow" => binary("pow", &evaluated, f64::powf),
-        // Normalize the bounds before clamping: `f64::clamp` panics when
-        // `min > max`, but the args are arbitrary finite sub-expressions with no
-        // ordering guarantee. Clamping to `[min(a, b), max(a, b)]` keeps the
-        // evaluator's no-panic, error-returning contract and treats inverted
-        // bounds as the same interval.
+        // `f64::clamp` panics if min > max; normalize so inverted expr args never panic.
         "clamp" => {
             ternary("clamp", &evaluated, |value, a, b| value.clamp(a.min(b), a.max(b)))
         }
@@ -671,11 +671,6 @@ where
         "min" => binary("min", &evaluated, f64::min),
         "max" => binary("max", &evaluated, f64::max),
         "pow" => binary("pow", &evaluated, f64::powf),
-        // Normalize the bounds before clamping: `f64::clamp` panics when
-        // `min > max`, but the args are arbitrary finite sub-expressions with no
-        // ordering guarantee. Clamping to `[min(a, b), max(a, b)]` keeps the
-        // evaluator's no-panic, error-returning contract and treats inverted
-        // bounds as the same interval.
         "clamp" => {
             ternary("clamp", &evaluated, |value, a, b| value.clamp(a.min(b), a.max(b)))
         }
@@ -794,17 +789,14 @@ mod tests {
         let runtime = ExprRuntime::new();
         let vars = BTreeMap::new();
 
-        // Inverted bounds must not panic; the interval is normalized to [0, 10].
         assert_eq!(
             runtime.evaluate("clamp(5, 10, 0)", &vars).expect("inverted bounds must not panic"),
             5.0
         );
         assert_eq!(runtime.evaluate("clamp(-3, 10, 0)", &vars).expect("inverted bounds"), 0.0);
         assert_eq!(runtime.evaluate("clamp(99, 10, 0)", &vars).expect("inverted bounds"), 10.0);
-        // Normal ordering still behaves identically.
         assert_eq!(runtime.evaluate("clamp(5, 0, 10)", &vars).expect("normal bounds"), 5.0);
 
-        // The resolver evaluation path shares the same clamp implementation.
         let compiled = runtime.compile("clamp(5, hi, lo)").expect("compile");
         let resolved = runtime
             .evaluate_compiled_with_resolver(&compiled, |name| match name {

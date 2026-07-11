@@ -1,3 +1,10 @@
+//! Filesystem writers for CI-friendly run and batch artifact packs.
+//!
+//! Each write creates (or reuses) an output directory, purges known artifact
+//! filenames so packs match their manifests, and emits deterministic JSON/CSV
+//! plus `manifest.json`. Side effect: only the fixed artifact basenames are
+//! removed; unrelated caller files in the directory are left alone.
+
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
@@ -44,6 +51,11 @@ const CONTENT_TYPE_JSON: &str = "application/json";
 const CONTENT_TYPE_JSONL: &str = "application/x-ndjson";
 const CONTENT_TYPE_CSV: &str = "text/csv";
 
+/// Writes a run artifact pack without an assertions file.
+///
+/// # Side effects
+/// Creates `output_dir` if needed, deletes known prior artifact basenames there,
+/// and writes events, variables, history, replay, series, and manifest files.
 pub fn write_run_artifacts(
     output_dir: impl AsRef<Path>,
     run_report: &RunReport,
@@ -162,6 +174,7 @@ pub fn write_run_artifacts_with_assertions(
     Ok(manifest)
 }
 
+/// Writes a batch pack (series, summary, prediction, manifest) at default confidence.
 pub fn write_batch_artifacts(
     output_dir: impl AsRef<Path>,
     batch_report: &BatchReport,
@@ -173,6 +186,9 @@ pub fn write_batch_artifacts(
     )
 }
 
+/// Writes a batch pack using an explicit prediction confidence level.
+///
+/// Emits aggregate `series.csv`, `summary.csv`, `prediction.json`, and `manifest.json`.
 pub fn write_batch_artifacts_with_confidence_level(
     output_dir: impl AsRef<Path>,
     batch_report: &BatchReport,
@@ -214,16 +230,15 @@ fn artifact_ref(kind: ArtifactKind, path: &str, content_type: &str) -> ArtifactR
     ArtifactRef { kind, path: path.to_string(), content_type: Some(content_type.to_string()) }
 }
 
+/// Ensures `output_dir` exists and clears prior known artifact basenames in place.
+///
+/// Writers only overwrite files they emit; without this purge a reused directory
+/// would keep stale siblings (e.g. old `assertions.json`) not listed in the new
+/// manifest. Unrelated caller files are left alone.
 fn ensure_output_dir(output_dir: &Path) -> Result<(), ArtifactError> {
     fs::create_dir_all(output_dir)
         .map_err(|source| ArtifactError::io(path_to_string(output_dir), source))?;
 
-    // Purge any artifact files left by a previous write into this same directory.
-    // Each writer truncate-overwrites only the names it emits, so without this a
-    // reused directory becomes a union of stale + fresh files (e.g. a leftover
-    // assertions.json or batch prediction.json) that the new manifest no longer
-    // references. Only the known artifact names are removed, so unrelated files a
-    // caller placed in the directory are left untouched.
     for file in ARTIFACT_FILES {
         let path = output_dir.join(file);
         match fs::remove_file(&path) {
@@ -240,12 +255,14 @@ fn write_manifest_json(path: &Path, manifest: &ManifestRef) -> Result<(), Artifa
     write_pretty_json(path, MANIFEST_FILE, manifest)
 }
 
+/// Reads a manifest from disk and upgrades older schema fields to current defaults.
 pub fn read_manifest_compat(path: impl AsRef<Path>) -> Result<ManifestRef, ArtifactError> {
     let path = path.as_ref();
     let bytes = fs::read(path).map_err(|source| ArtifactError::io(path_to_string(path), source))?;
     read_manifest_compat_from_slice(&bytes)
 }
 
+/// Deserializes a manifest blob and applies [`ManifestRef::upgrade_compat`].
 pub fn read_manifest_compat_from_slice(bytes: &[u8]) -> Result<ManifestRef, ArtifactError> {
     let manifest = serde_json::from_slice::<ManifestRef>(bytes)
         .map_err(|source| ArtifactError::serialization(MANIFEST_FILE, source))?;
@@ -498,11 +515,10 @@ fn encode_csv_field(value: &str) -> String {
     }
 }
 
+/// Formats a finite `f64` for CSV; non-finite values become an empty field.
+///
+/// Ryu would emit bare `NaN`/`inf` tokens that break naive `parse::<f64>()`.
 fn format_f64(value: f64) -> String {
-    // A non-finite value has no reparseable numeric CSV token; ryu would render
-    // it as a bare `NaN`/`inf`/`-inf` that breaks downstream `parse::<f64>()`.
-    // Emit an empty field (a missing value) instead, mirroring how the stats path
-    // treats non-finite samples as absent.
     if !value.is_finite() {
         return String::new();
     }
@@ -861,8 +877,6 @@ mod tests {
 
     #[test]
     fn write_series_csv_emits_empty_field_for_non_finite_values() {
-        // Non-finite series values must not land in the numeric `value` column as
-        // ryu's bare `NaN`/`inf`/`-inf` tokens, which break downstream parse::<f64>.
         assert_eq!(format_f64(f64::NAN), "");
         assert_eq!(format_f64(f64::INFINITY), "");
         assert_eq!(format_f64(f64::NEG_INFINITY), "");
@@ -1170,8 +1184,6 @@ mod tests {
         let tempdir = tempdir().expect("tempdir");
         let dir = tempdir.path();
 
-        // Same-kind: a write with assertions leaves assertions.json; a later write
-        // without assertions must not leave it behind.
         let run_report = RunReport::new(ScenarioId::fixture("scenario-run"), 7);
         let events = vec![RunEvent::step_start("run-1", 0, 0, StepStartEvent { seed: 7 })];
         let assertions = AssertionReport { total: 0, passed: 0, failed: 0, results: vec![] };
@@ -1183,8 +1195,6 @@ mod tests {
         assert!(!manifest.artifacts.contains_key("assertions"));
         assert!(!dir.join(ASSERTIONS_FILE).exists(), "stale assertions.json must be purged");
 
-        // Cross-kind: batch artifacts leave prediction.json + summary.csv; a run
-        // write into the same directory must not leave those batch-only files.
         let batch_report =
             BatchReport::new(ScenarioId::fixture("scenario-batch"), 2, ExecutionMode::SingleThread);
         write_batch_artifacts(dir, &batch_report).expect("write batch");
@@ -1195,7 +1205,6 @@ mod tests {
         assert!(!dir.join(PREDICTION_FILE).exists(), "stale prediction.json must be purged");
         assert!(!dir.join(SUMMARY_FILE).exists(), "stale summary.csv must be purged");
 
-        // The on-disk file set equals the manifest's declared artifacts.
         let mut on_disk = fs::read_dir(dir)
             .expect("read dir")
             .map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned())

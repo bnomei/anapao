@@ -1,3 +1,10 @@
+//! Run and batch execution controls: seeds, step limits, capture, and confidence.
+//!
+//! [`RunConfig`] pins a single deterministic run. [`BatchConfig`] plus
+//! [`BatchRunTemplate`] describe Monte Carlo batches whose per-run seeds are
+//! derived from `base_seed` and run index. [`CaptureConfig`] selects which nodes
+//! and metrics appear in series and snapshots.
+
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
@@ -6,7 +13,10 @@ use super::{MetricKey, NodeId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-/// Execution strategy for batch runs.
+/// Sequential vs parallel batch scheduling strategy.
+///
+/// `Rayon` requires the `parallel` feature; without it the batch layer falls back
+/// to single-thread execution.
 pub enum ExecutionMode {
     #[default]
     SingleThread,
@@ -15,7 +25,7 @@ pub enum ExecutionMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-/// Supported confidence levels for prediction interval diagnostics.
+/// Two-sided confidence levels used by prediction-interval diagnostics.
 pub enum ConfidenceLevel {
     P90,
     #[default]

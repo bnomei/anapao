@@ -1,3 +1,10 @@
+//! Declarative scenario graph: nodes, edges, transfers, variables, and end conditions.
+//!
+//! [`ScenarioSpec`] is the authoring surface compiled by
+//! [`crate::Simulator::compile`]. Node families, connection kinds (resource vs
+//! state), transfer rules, and end conditions encode the Machinations-style model
+//! the engine executes. Legacy node-kind aliases remain for older fixtures.
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
@@ -6,7 +13,7 @@ use super::{EdgeId, MetricKey, NodeId, ScenarioId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-/// Supported node families in simulation graphs.
+/// Node family selecting runtime behavior and valid config shapes.
 pub enum NodeKind {
     Source,
     Pool,
@@ -28,7 +35,7 @@ pub enum NodeKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-/// Trigger policy for gate-like nodes.
+/// When a gate-like node evaluates during a step.
 pub enum TriggerMode {
     #[serde(alias = "passive")]
     Passive,
@@ -44,7 +51,7 @@ pub enum TriggerMode {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-/// Action policy for gate-like nodes.
+/// How a gate-like node pulls or pushes resource flow.
 pub enum ActionMode {
     #[serde(alias = "push-any")]
     #[default]
@@ -195,7 +202,7 @@ pub enum NodeConfig {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-/// Transfer rule used by edges when moving resource values.
+/// How much resource an edge attempts to move on each evaluation.
 pub enum TransferSpec {
     Fixed { amount: f64 },
     Fraction { numerator: u64, denominator: u64 },
@@ -206,7 +213,7 @@ pub enum TransferSpec {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-/// Stopping conditions for a simulation run.
+/// When a run stops early or after a step budget (AND/OR composable).
 pub enum EndConditionSpec {
     MaxSteps { steps: u64 },
     MetricAtLeast { metric: MetricKey, value_scaled: i64 },
@@ -219,7 +226,7 @@ pub enum EndConditionSpec {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-/// Update schedule for runtime variables.
+/// When scenario variables are re-sampled relative to the run lifecycle.
 pub enum VariableUpdateTiming {
     #[default]
     EveryStep,
@@ -229,7 +236,7 @@ pub enum VariableUpdateTiming {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-/// Value source used for runtime variables.
+/// Stochastic or constant sampler backing one named runtime variable.
 pub enum VariableSourceSpec {
     Constant { value: f64 },
     RandomInterval { min: i64, max: i64 },
@@ -248,7 +255,7 @@ pub struct VariableRuntimeConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-/// Connection family for an edge.
+/// Resource flow edge versus state/modifier edge semantics.
 pub enum ConnectionKind {
     #[default]
     Resource,

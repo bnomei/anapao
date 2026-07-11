@@ -1,4 +1,8 @@
-//! Stochastic sampling helpers used by variable and gate runtime logic.
+//! Validated stochastic primitives for variables, gates, and expression helpers.
+//!
+//! Specs are checked before sampling so invalid ranges or weights fail at setup
+//! with [`SetupError`] instead of panicking mid-run. Engine variable and gate
+//! paths call these helpers through salted RNG streams.
 
 use rand::distr::Distribution;
 use rand::RngExt;
@@ -9,7 +13,7 @@ use crate::error::SetupError;
 use crate::rng::BaseRng;
 
 #[derive(Debug, Clone, PartialEq)]
-/// Declarative stochastic primitive used by expression/runtime features.
+/// Declarative sampler shape (uniform, Bernoulli, dice, weighted discrete).
 pub enum StochasticSpec {
     UniformInt { min: i64, max: i64 },
     Bernoulli { p: f64, success: f64, failure: f64 },

@@ -1,3 +1,10 @@
+//! Public façade for compile, single-run, batch, assertion, and event-streaming workflows.
+//!
+//! [`Simulator`] is the stable entrypoint used by tests and tooling. It validates
+//! configs, delegates step execution to the engine and batch layers, evaluates
+//! expectations, and optionally streams ordered [`crate::events::RunEvent`]s to an
+//! [`crate::events::EventSink`] for live diagnostics or artifact capture.
+
 use crate::assertions::{self, AssertionReport, Expectation};
 use crate::batch;
 use crate::engine;
@@ -10,17 +17,28 @@ use crate::types::{BatchConfig, RunConfig, ScenarioSpec};
 use crate::validation;
 use crate::validation::CompiledScenario;
 
-/// Public entrypoint for compile/run/batch workflows.
+/// Stable façade for compile → run/batch → assert workflows.
+///
+/// Methods are pure orchestration: they do not own long-lived process state.
+/// Compile once, reuse the [`CompiledScenario`] for many seeded runs.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Simulator;
 
 impl Simulator {
-    /// Compile a scenario spec into deterministic indexes and validated structure.
+    /// Validates a [`ScenarioSpec`] and builds deterministic node/edge indexes.
+    ///
+    /// # Errors
+    /// Returns [`SetupError`] for missing graph references, cycles, invalid
+    /// transfers, node configs, or variable sources.
     pub fn compile(spec: ScenarioSpec) -> Result<CompiledScenario, SetupError> {
         validation::compile_scenario(&spec)
     }
 
-    /// Execute a single deterministic run.
+    /// Runs one seeded simulation and returns a [`crate::types::RunReport`].
+    ///
+    /// # Errors
+    /// Returns [`RunError`] for invalid run config, step overflow, sink failures,
+    /// or runtime violations.
     pub fn run(
         compiled: &CompiledScenario,
         config: &RunConfig,
@@ -28,7 +46,10 @@ impl Simulator {
         Self::run_internal(compiled, config, None)
     }
 
-    /// Execute a single deterministic run and stream synthetic run events to a sink.
+    /// Runs one seeded simulation while streaming live step events to `sink`.
+    ///
+    /// Events are emitted in deterministic [`crate::events::RunEventOrder`] and
+    /// flushed once before returning.
     pub fn run_with_sink(
         compiled: &CompiledScenario,
         config: &RunConfig,
@@ -57,7 +78,10 @@ impl Simulator {
         Ok(report)
     }
 
-    /// Execute a single deterministic run and evaluate run expectations.
+    /// Runs one seeded simulation and evaluates run-level [`Expectation`]s.
+    ///
+    /// Expectations are validated before the engine starts so a malformed
+    /// expectation cannot leave a sink half-filled.
     pub fn run_with_assertions(
         compiled: &CompiledScenario,
         config: &RunConfig,
@@ -66,7 +90,10 @@ impl Simulator {
         Self::run_with_assertions_internal(compiled, config, expectations, None)
     }
 
-    /// Execute a single deterministic run, evaluate expectations, and stream run + assertion events.
+    /// Runs one seeded simulation with assertions and streams run plus checkpoint events.
+    ///
+    /// Terminal `step_end` is deferred until after assertion checkpoints so the
+    /// raw stream stays ordered for a single run lifecycle.
     pub fn run_with_assertions_and_sink(
         compiled: &CompiledScenario,
         config: &RunConfig,
@@ -84,11 +111,6 @@ impl Simulator {
         mut sink: Option<&mut dyn EventSink>,
     ) -> Result<(crate::types::RunReport, AssertionReport), SimError> {
         validation::validate_run_config(config)?;
-        // Validate the static portion of the expectations before running the
-        // engine, mirroring `validate_run_config`. Otherwise a malformed
-        // expectation (e.g. inverted `Between` bounds) would fail only after the
-        // streaming engine has pushed the full event stream into the sink but
-        // before `sink.flush()`, silently stranding the buffered events.
         assertions::validate_expectations(expectations)?;
         let report = if let Some(active_sink) = sink.as_deref_mut() {
             engine::run_single_streaming_for_assertions(compiled, config, "run-0", active_sink)?
@@ -119,7 +141,9 @@ impl Simulator {
         Ok((report, assertion_report))
     }
 
-    /// Execute deterministic batch runs.
+    /// Runs a deterministic Monte Carlo batch and aggregates per-run summaries.
+    ///
+    /// Per-run seeds are derived from [`BatchConfig::base_seed`] and run index.
     pub fn run_batch(
         compiled: &CompiledScenario,
         config: &BatchConfig,
@@ -127,7 +151,10 @@ impl Simulator {
         Self::run_batch_internal(compiled, config, None)
     }
 
-    /// Execute deterministic batch runs and stream summary events to a sink.
+    /// Runs a batch and streams compact per-run summary events to `sink`.
+    ///
+    /// Batch streaming emits one start/metric/end envelope per run rather than
+    /// every intermediate step event from the engine.
     pub fn run_batch_with_sink(
         compiled: &CompiledScenario,
         config: &BatchConfig,
@@ -152,7 +179,7 @@ impl Simulator {
         Ok(report)
     }
 
-    /// Execute deterministic batch runs and evaluate batch expectations.
+    /// Runs a batch and evaluates batch-level [`Expectation`]s against the aggregate report.
     pub fn run_batch_with_assertions(
         compiled: &CompiledScenario,
         config: &BatchConfig,
@@ -161,7 +188,10 @@ impl Simulator {
         Self::run_batch_with_assertions_internal(compiled, config, expectations, None)
     }
 
-    /// Execute deterministic batch runs, evaluate expectations, and stream summary + assertions.
+    /// Runs a batch with assertions and streams summary events plus batch checkpoints.
+    ///
+    /// Batch assertion checkpoints use run id `run-batch` so they sort after every
+    /// `run-{index}` envelope under the event-order contract.
     pub fn run_batch_with_assertions_and_sink(
         compiled: &CompiledScenario,
         config: &BatchConfig,
@@ -183,11 +213,6 @@ impl Simulator {
 
         if let Some(sink) = sink {
             emit_batch_events(sink, &report)?;
-            // Batch-level assertion checkpoints are emitted after every per-run
-            // event. The raw sink stream must stay monotonic by `RunEventOrder`
-            // (spec 032), which orders by `run_id` lexicographically, so the
-            // checkpoint run_id must sort after all `run-{index}` ids. "run-batch"
-            // does: 'b' is greater than any digit, so it follows every numbered run.
             emit_assertion_checkpoints(sink, "run-batch", 0, &assertion_report)
                 .map_err(map_sink_error)?;
             sink.flush().map_err(map_sink_error)?;
@@ -488,16 +513,13 @@ mod tests {
 
     #[test]
     fn simulator_run_with_malformed_expectation_streams_no_events() {
-        // A malformed expectation must be rejected before the engine streams any
-        // events into the sink, so a buffered/file-backed sink never ends up with
-        // events that were pushed but never flushed.
         let compiled = fixture_compiled_scenario().expect("compiled fixture");
         let mut sink = VecEventSink::new();
         let expectations = vec![Expectation::Between {
             metric: MetricKey::fixture("sink"),
             selector: MetricSelector::Final,
             min: 5.0,
-            max: 1.0, // inverted bounds -> static validation failure
+            max: 1.0,
         }];
 
         let result = Simulator::run_with_assertions_and_sink(
@@ -516,9 +538,6 @@ mod tests {
 
     #[test]
     fn simulator_run_batch_with_assertions_emits_monotonic_raw_stream() {
-        // The "batch" assertion checkpoints are emitted after every per-run event,
-        // so the raw sink stream must already be monotonic by event order without
-        // pre-sorting (spec 032).
         let compiled = fixture_compiled_scenario().expect("compiled fixture");
         let mut sink = VecEventSink::new();
         let expectations = vec![Expectation::Between {

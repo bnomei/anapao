@@ -1,4 +1,8 @@
-//! Core domain types for scenario definitions, execution reports, and artifacts.
+//! Shared domain model for scenarios, run/batch configs, reports, and artifacts.
+//!
+//! Types here are serde-stable contracts shared by the engine, assertions, and
+//! artifact writers. Prefer these identifiers and report shapes over ad-hoc maps
+//! when crossing module boundaries.
 
 mod artifacts;
 mod config;

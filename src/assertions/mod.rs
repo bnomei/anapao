@@ -1,3 +1,9 @@
+//! Typed expectation language and deterministic evaluation against run/batch reports.
+//!
+//! Expectations can be validated before a run so malformed bounds never leave a
+//! streaming sink half-filled. Evaluation returns an [`AssertionReport`] with
+//! per-expectation evidence refs suitable for checkpoints and `assertions.json`.
+
 use serde::{Deserialize, Serialize};
 
 use crate::error::AssertionError;
@@ -7,7 +13,7 @@ const MAX_FAILURE_EVIDENCE_REFS: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-/// Selects which value window an expectation inspects.
+/// Which scalar observation an equality/range expectation inspects.
 pub enum MetricSelector {
     #[default]
     Final,
@@ -94,6 +100,7 @@ pub enum Expectation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Pointer from a failed or inspected expectation back to a metric observation.
 pub struct EvidenceRef {
     pub metric: MetricKey,
     pub context: String,
@@ -106,6 +113,7 @@ impl EvidenceRef {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Outcome of evaluating one [`Expectation`], including printable expected/actual.
 pub struct AssertionResult {
     pub expectation: Expectation,
     pub passed: bool,
@@ -134,6 +142,7 @@ impl AssertionReport {
         Self { total, passed, failed, results }
     }
 
+    /// Returns true when every expectation passed (`failed == 0`).
     pub fn is_success(&self) -> bool {
         self.failed == 0
     }
@@ -151,6 +160,7 @@ pub fn validate_expectations(expectations: &[Expectation]) -> Result<(), Asserti
     Ok(())
 }
 
+/// Evaluates expectations against a single-run report in declaration order.
 pub fn evaluate_run_expectations(
     run_report: &RunReport,
     expectations: &[Expectation],
@@ -166,6 +176,7 @@ pub fn evaluate_run_expectations(
     Ok(AssertionReport::from_results(results))
 }
 
+/// Evaluates expectations against batch aggregates and per-run finals.
 pub fn evaluate_batch_expectations(
     batch_report: &BatchReport,
     expectations: &[Expectation],
@@ -336,6 +347,8 @@ fn observe_run_scalar(
     }
 }
 
+/// Reads a batch scalar. `Final` is the mean of per-run `final_metrics`, not the
+/// last `aggregate_series` point (that only includes runs that reached that step).
 fn observe_batch_scalar(
     batch_report: &BatchReport,
     metric: &MetricKey,
@@ -343,12 +356,6 @@ fn observe_batch_scalar(
 ) -> ScalarObservation {
     match selector {
         MetricSelector::Final => {
-            // Aggregate the per-run terminal values, mirroring how
-            // `evaluate_batch_probability_band` reads `run.final_metrics`. Using
-            // the last point of `aggregate_series` would instead report the mean
-            // at the highest captured step, which counts only the runs that
-            // reached that step and diverges from the cross-run final value users
-            // expect when runs differ in length.
             let context = "batch.runs.final_metrics.mean";
             let (sum, count) = batch_report.runs.iter().fold((0.0, 0u64), |(sum, count), run| {
                 match run.final_metrics.get(metric).copied() {
@@ -432,11 +439,7 @@ fn evaluate_monotonic_non_decreasing(
         };
     };
 
-    // A non-finite point makes IEEE-754 ordered comparisons false on both sides,
-    // so a NaN between a decreasing pair would otherwise hide the decrease and
-    // produce a false pass. A series containing NaN/inf is not a well-defined
-    // monotonic series, so fail explicitly before the ordering check (which is
-    // then guaranteed to run over finite values only).
+    // NaN makes `a <= b` false both ways and would hide a later decrease; fail first.
     if let Some(point) = points.iter().find(|point| !point.value.is_finite()) {
         evidence_refs.push(EvidenceRef::new(
             metric.clone(),
@@ -815,8 +818,6 @@ mod tests {
 
     #[test]
     fn run_monotonic_fails_on_non_finite_series_value() {
-        // A NaN between a decreasing pair must not produce a false pass: the
-        // series 5.0 -> NaN -> 1.0 is plainly not non-decreasing.
         let metric = MetricKey::fixture("load");
         let mut run_report = fixture_run_report();
         run_report.series.insert(
@@ -1029,9 +1030,6 @@ mod tests {
 
     #[test]
     fn batch_final_selector_averages_per_run_finals_across_uneven_run_lengths() {
-        // Two runs of different lengths. The aggregate-series tail at the highest
-        // step reflects only the longer run (10.0), but the cross-run final value
-        // is the mean of per-run finals: (10 + 3) / 2 = 6.5.
         let throughput = MetricKey::fixture("throughput");
 
         let mut batch_report =
@@ -1044,7 +1042,6 @@ mod tests {
                 points: vec![
                     SeriesPoint::new(0, 0.0),
                     SeriesPoint::new(3, 6.5),
-                    // Only the longer run reaches step 10, so the tail is its value.
                     SeriesPoint::new(10, 10.0),
                 ],
             },
@@ -1239,9 +1236,6 @@ mod tests {
                 seed: run_index as u64 + 100,
                 completed: true,
                 steps_executed: 2,
-                // A tracked metric appears in both the aggregate series and each
-                // run's final_metrics. throughput is constant 10.0 so its per-run
-                // mean matches the aggregate-series tail.
                 final_metrics: BTreeMap::from([
                     (pass_rate.clone(), value),
                     (throughput.clone(), 10.0),

@@ -1,14 +1,20 @@
+//! Seed derivation and ChaCha8 RNG helpers that pin run-to-run determinism.
+//!
+//! Per-run seeds are `splitmix64(master_seed ^ run_id)` so neighboring run ids
+//! produce well-diffused streams. Engine code also salts streams for variables
+//! and gates; batch code uses [`derive_run_seed`] for Monte Carlo members.
+
 use rand::{distr::Distribution, Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
-/// Base deterministic RNG for simulation runs.
+/// Process RNG type used for all seeded simulation draws (`ChaCha8Rng`).
 pub type BaseRng = ChaCha8Rng;
 
 const SPLITMIX64_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
 const SPLITMIX64_MUL1: u64 = 0xBF58_476D_1CE4_E5B9;
 const SPLITMIX64_MUL2: u64 = 0x94D0_49BB_1331_11EB;
 
-/// SplitMix64-style mixer used for deterministic seed derivation.
+/// SplitMix64 finalizer used as the project's stable seed mixer.
 pub fn splitmix64_mix(value: u64) -> u64 {
     let mut mixed = value.wrapping_add(SPLITMIX64_GAMMA);
     mixed = (mixed ^ (mixed >> 30)).wrapping_mul(SPLITMIX64_MUL1);
@@ -16,22 +22,22 @@ pub fn splitmix64_mix(value: u64) -> u64 {
     mixed ^ (mixed >> 31)
 }
 
-/// Derives a deterministic per-run seed from a master seed and run identifier.
+/// Derives the per-run seed from a batch/master seed and run index.
 pub fn derive_run_seed(master_seed: u64, run_id: u64) -> u64 {
     splitmix64_mix(master_seed ^ run_id)
 }
 
-/// Creates the base RNG from a u64 seed.
+/// Seeds a [`BaseRng`] from an explicit u64 seed.
 pub fn rng_from_seed(seed: u64) -> BaseRng {
     BaseRng::seed_from_u64(seed)
 }
 
-/// Creates a deterministic per-run RNG from the master seed and run id.
+/// Builds the RNG stream for one Monte Carlo member.
 pub fn run_rng(master_seed: u64, run_id: u64) -> BaseRng {
     rng_from_seed(derive_run_seed(master_seed, run_id))
 }
 
-/// Runs a closure with a deterministic per-run RNG.
+/// Invokes `draw_fn` with a freshly seeded per-run RNG.
 pub fn with_run_rng<T>(
     master_seed: u64,
     run_id: u64,
@@ -41,9 +47,9 @@ pub fn with_run_rng<T>(
     draw_fn(&mut rng)
 }
 
-/// Helpers for deterministic draw workflows used by engine and batch layers.
+/// Extension helpers for fixed-order sampling on any [`Rng`].
 pub trait DeterministicDrawExt: Rng {
-    /// Draws one sample from a distribution.
+    /// Samples one value, advancing the RNG once.
     fn draw<T, D>(&mut self, distribution: D) -> T
     where
         D: Distribution<T>,
@@ -51,7 +57,7 @@ pub trait DeterministicDrawExt: Rng {
         distribution.sample(self)
     }
 
-    /// Draws a fixed number of samples from a clonable distribution.
+    /// Samples `count` values in order from a clonable distribution.
     fn draw_many<T, D>(&mut self, distribution: D, count: usize) -> Vec<T>
     where
         D: Distribution<T> + Clone,
@@ -62,7 +68,7 @@ pub trait DeterministicDrawExt: Rng {
 
 impl<R: Rng + ?Sized> DeterministicDrawExt for R {}
 
-/// Draws a single deterministic sample for a run.
+/// One-shot sample for a run seed without retaining the RNG.
 pub fn draw_for_run<T, D>(master_seed: u64, run_id: u64, distribution: D) -> T
 where
     D: Distribution<T>,
@@ -70,7 +76,7 @@ where
     with_run_rng(master_seed, run_id, |rng| rng.draw(distribution))
 }
 
-/// Draws multiple deterministic samples for a run.
+/// Prefix-stable multi-draw helper for a run seed.
 pub fn draw_many_for_run<T, D>(
     master_seed: u64,
     run_id: u64,

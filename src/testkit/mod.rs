@@ -1,4 +1,7 @@
-//! Deterministic fixtures and parity helpers for tests and docs.
+//! Shared deterministic fixtures, parity catalog loaders, and rstest entrypoints.
+//!
+//! Keeps integration tests and doctests on identical seeds, scenarios, and
+//! catalog paths so playbook snippets and CI parity suites do not drift.
 
 pub mod pikmin;
 
