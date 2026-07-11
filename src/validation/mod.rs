@@ -10,7 +10,10 @@ use std::collections::BTreeMap;
 
 use crate::error::SetupError;
 use crate::expr::ExprRuntime;
-use crate::plan::{CompiledEdge, CompiledNode, EdgeIndex, NodeIndex, PlanIndexes, PlanProjections};
+use crate::plan::{
+    CompiledEdge, CompiledExpressions, CompiledNode, EdgeIndex, ExpressionSlots, MetricPlan,
+    NodeIndex, PlanIndexes, PlanProjections, RoutingPlan,
+};
 use crate::types::{
     BatchConfig, BatchRunTemplate, ConnectionKind, DelayNodeConfig, EdgeId, EdgeSpec,
     EndConditionSpec, MetricKey, NodeConfig, NodeId, NodeKind, NodeSpec, QueueNodeConfig,
@@ -59,7 +62,7 @@ fn compile_scenario_owned(spec: ScenarioSpec) -> Result<CompiledScenario, SetupE
     validate_transfer_metric_references(&spec)?;
     validate_tracked_metric_references(&spec)?;
     validate_resource_connection_cycles(&spec)?;
-    validate_connection_invariants(&spec)?;
+    let expression_slots = validate_connection_invariants(&spec)?;
     validate_node_invariants(&spec)?;
     validate_variable_sources(&spec)?;
 
@@ -76,12 +79,6 @@ fn compile_scenario_owned(spec: ScenarioSpec) -> Result<CompiledScenario, SetupE
         .enumerate()
         .map(|(index, edge_id)| (edge_id.clone(), EdgeIndex::new(index)))
         .collect();
-    let metric_index_by_name: BTreeMap<String, NodeIndex> = node_ids
-        .iter()
-        .enumerate()
-        .map(|(index, node_id)| (node_id.as_str().to_string(), NodeIndex::new(index)))
-        .collect();
-
     let nodes =
         node_ids.iter().map(|id| CompiledNode::new(id.clone(), spec.nodes[id].clone())).collect();
     let edges = edge_ids
@@ -94,10 +91,15 @@ fn compile_scenario_owned(spec: ScenarioSpec) -> Result<CompiledScenario, SetupE
         })
         .collect();
 
+    let routing = RoutingPlan::from_spec(&spec, &node_index_by_id, &edge_index_by_id);
+    let metrics = MetricPlan::from_spec(&spec, &node_index_by_id);
     Ok(CompiledScenario::from_validated(
         spec,
         PlanProjections::new(node_ids, edge_ids, nodes, edges),
-        PlanIndexes::new(node_index_by_id, edge_index_by_id, metric_index_by_name),
+        PlanIndexes::new(node_index_by_id.clone(), edge_index_by_id.clone()),
+        CompiledExpressions::from_slots(expression_slots),
+        routing,
+        metrics,
     ))
 }
 
@@ -398,11 +400,12 @@ fn detect_cycle_from(
     None
 }
 
-fn validate_connection_invariants(spec: &ScenarioSpec) -> Result<(), SetupError> {
+fn validate_connection_invariants(spec: &ScenarioSpec) -> Result<Vec<ExpressionSlots>, SetupError> {
+    let mut expressions = Vec::with_capacity(spec.edges.len());
     for (edge_id, edge) in &spec.edges {
-        match edge.connection.kind {
+        let transfer = match edge.connection.kind {
             ConnectionKind::Resource => {
-                validate_resource_connection_invariants(edge_id, edge)?;
+                let transfer = validate_resource_connection_invariants(edge_id, edge)?;
                 if edge.connection.state != Default::default() {
                     return Err(SetupError::InvalidParameter {
                         name: format!("edges.{edge_id}.connection.state"),
@@ -410,18 +413,24 @@ fn validate_connection_invariants(spec: &ScenarioSpec) -> Result<(), SetupError>
                             .to_string(),
                     });
                 }
+                transfer
             }
+            ConnectionKind::State => None,
+        };
+        let state = match edge.connection.kind {
             ConnectionKind::State => validate_state_connection_invariants(spec, edge_id, edge)?,
-        }
+            ConnectionKind::Resource => None,
+        };
+        expressions.push(ExpressionSlots { transfer, state });
     }
 
-    Ok(())
+    Ok(expressions)
 }
 
 fn validate_resource_connection_invariants(
     edge_id: &EdgeId,
     edge: &EdgeSpec,
-) -> Result<(), SetupError> {
+) -> Result<Option<crate::expr::CompiledExpr>, SetupError> {
     if edge.connection.resource.token_size == 0 {
         return Err(SetupError::InvalidParameter {
             name: format!("edges.{edge_id}.connection.resource.token_size"),
@@ -447,13 +456,17 @@ fn validate_resource_connection_invariants(
                 });
             }
         }
-        TransferSpec::Expression { formula } => {
-            validate_formula(format!("edges.{edge_id}.transfer.expression.formula"), formula)?
-        }
+        TransferSpec::Expression { .. } => {}
         TransferSpec::MetricScaled { .. } | TransferSpec::Remaining => {}
     }
 
-    Ok(())
+    let expression = match &edge.transfer {
+        TransferSpec::Expression { formula } => {
+            Some(validate_formula(format!("edges.{edge_id}.transfer.expression.formula"), formula)?)
+        }
+        _ => None,
+    };
+    Ok(expression)
 }
 
 /// Checks state-connection shape. Rejects Modifier → Delay/Queue: modifiers write
@@ -463,7 +476,7 @@ fn validate_state_connection_invariants(
     spec: &ScenarioSpec,
     edge_id: &EdgeId,
     edge: &EdgeSpec,
-) -> Result<(), SetupError> {
+) -> Result<Option<crate::expr::CompiledExpr>, SetupError> {
     if edge.connection.resource != ResourceConnectionConfig::default() {
         return Err(SetupError::InvalidParameter {
             name: format!("edges.{edge_id}.connection.resource"),
@@ -487,9 +500,11 @@ fn validate_state_connection_invariants(
         });
     }
 
-    if matches!(state.role, StateConnectionRole::Modifier) {
-        validate_formula(format!("edges.{edge_id}.connection.state.formula"), formula)?;
-    }
+    let expression = if matches!(state.role, StateConnectionRole::Modifier) {
+        Some(validate_formula(format!("edges.{edge_id}.connection.state.formula"), formula)?)
+    } else {
+        None
+    };
 
     if let Some(filter) = state.resource_filter.as_deref() {
         if filter.trim().is_empty() {
@@ -568,7 +583,7 @@ fn validate_state_connection_invariants(
         }
     }
 
-    Ok(())
+    Ok(expression)
 }
 
 fn required_state_target_connection<'a>(
@@ -602,8 +617,8 @@ fn formula_has_explicit_sign(formula: &str) -> bool {
     matches!(formula.chars().next(), Some('+') | Some('-'))
 }
 
-fn validate_formula(name: String, formula: &str) -> Result<(), SetupError> {
-    ExprRuntime::new().compile(formula).map(|_| ()).map_err(|error| SetupError::InvalidParameter {
+fn validate_formula(name: String, formula: &str) -> Result<crate::expr::CompiledExpr, SetupError> {
+    ExprRuntime::new().compile(formula).map_err(|error| SetupError::InvalidParameter {
         name,
         reason: format!("invalid expression: {error}"),
     })

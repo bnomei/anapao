@@ -14,14 +14,14 @@ use crate::events::{
     TransferEvent,
 };
 use crate::expr::{CompiledExpr, ExprError, ExprRuntime};
-use crate::plan::CompiledEdge;
+use crate::plan::{CompiledEdge, EdgeIndex, NodeIndex, TransferControl, TriggerTarget};
 use crate::rng::{rng_from_seed, BaseRng};
 use crate::stochastic::{
     sample_chance_percent, sample_closed_interval, sample_from_list, sample_from_matrix,
     sample_weighted_index,
 };
 use crate::types::{
-    ActionMode, ConnectionKind, EdgeId, EndConditionSpec, MetricKey, NodeConfig, NodeId, NodeKind,
+    ConnectionKind, EdgeId, EndConditionSpec, MetricKey, NodeConfig, NodeId, NodeKind,
     NodeModeConfig, NodeSnapshot, RunConfig, RunReport, SeriesPoint, SeriesTable,
     StateConnectionRole, StateConnectionTarget, TransferRecord, TransferSpec, TriggerMode,
     VariableSnapshot, VariableSourceSpec, VariableUpdateTiming,
@@ -46,6 +46,26 @@ struct VariableRuntimeState {
     sources: BTreeMap<String, VariableSourceSpec>,
     values: BTreeMap<String, f64>,
     rng: BaseRng,
+}
+
+/// Borrowed view of ASTs retained by the immutable compiled plan.
+#[derive(Debug, Clone, Copy)]
+struct ExpressionPlanRef<'a>(&'a CompiledScenario);
+
+impl<'a> ExpressionPlanRef<'a> {
+    fn new(compiled: &'a CompiledScenario) -> Self {
+        Self(compiled)
+    }
+
+    fn transfer_expression(&self, edge_id: &EdgeId) -> Option<&'a CompiledExpr> {
+        let edge = EdgeIndex::new(self.0.edge_index(edge_id)?);
+        self.0.expressions().transfer(edge)
+    }
+
+    fn state_expression(&self, edge_id: &EdgeId) -> Option<&'a CompiledExpr> {
+        let edge = EdgeIndex::new(self.0.edge_index(edge_id)?);
+        self.0.expressions().state(edge)
+    }
 }
 
 impl VariableRuntimeState {
@@ -80,57 +100,6 @@ impl VariableRuntimeState {
                 self.values.insert(name.clone(), canonicalize_float(value));
             }
         }
-    }
-}
-
-#[derive(Debug, Default)]
-struct EngineExpressionCache {
-    transfer_by_edge: BTreeMap<EdgeId, CompiledExpr>,
-    state_by_edge: BTreeMap<EdgeId, CompiledExpr>,
-}
-
-impl EngineExpressionCache {
-    fn from_compiled(compiled: &CompiledScenario, runtime: &ExprRuntime) -> Result<Self, RunError> {
-        let mut cache = Self::default();
-
-        for edge in compiled.edges() {
-            let edge_id = edge.id();
-            let edge = edge.spec();
-            if !edge.enabled {
-                continue;
-            }
-
-            if let TransferSpec::Expression { formula } = &edge.transfer {
-                let compiled_expression = runtime.compile(formula).map_err(|error| {
-                    formula_run_error(format!("edges.{edge_id}.transfer.expression.formula"), error)
-                })?;
-                cache.transfer_by_edge.insert(edge_id.clone(), compiled_expression);
-            }
-
-            if matches!(edge.connection.kind, ConnectionKind::State)
-                && matches!(edge.connection.state.role, StateConnectionRole::Modifier)
-                && matches!(edge.connection.state.target, StateConnectionTarget::Node)
-            {
-                let compiled_expression =
-                    runtime.compile(&edge.connection.state.formula).map_err(|error| {
-                        formula_run_error(
-                            format!("edges.{edge_id}.connection.state.formula"),
-                            error,
-                        )
-                    })?;
-                cache.state_by_edge.insert(edge_id.clone(), compiled_expression);
-            }
-        }
-
-        Ok(cache)
-    }
-
-    fn transfer_expression(&self, edge_id: &EdgeId) -> Option<&CompiledExpr> {
-        self.transfer_by_edge.get(edge_id)
-    }
-
-    fn state_expression(&self, edge_id: &EdgeId) -> Option<&CompiledExpr> {
-        self.state_by_edge.get(edge_id)
     }
 }
 
@@ -522,8 +491,8 @@ fn run_single_internal(
     let mut report = RunReport::new(compiled.scenario_id().clone(), config.seed);
     let mut state = init_state(compiled);
     let runtime = ExprRuntime::new();
-    let expression_cache = EngineExpressionCache::from_compiled(compiled, &runtime)?;
-    let step_plan = EngineStepPlan::from_compiled(compiled);
+    let expression_cache = ExpressionPlanRef::new(compiled);
+    let step_plan = compiled.routing();
     let mut variables = VariableRuntimeState::from_compiled(compiled, config.seed);
     let mut gates = GateRuntimeState::from_seed(config.seed);
     let mut timeline = TimelineRuntimeState::from_compiled(compiled, &state);
@@ -579,7 +548,7 @@ fn run_single_internal(
         let transfer_start = transfer_log.len();
         apply_edge_transfers(
             compiled,
-            &step_plan,
+            step_plan,
             &mut state,
             &runtime,
             &expression_cache,
@@ -701,88 +670,10 @@ fn apply_source_generation(compiled: &CompiledScenario, state: &mut EngineState)
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum TransferControl {
-    PullAny,
-    PullAll,
-    PushAny,
-    PushAll,
-}
-
 #[derive(Debug, Default)]
 struct StepTriggers {
     nodes: BTreeSet<NodeId>,
     edges: BTreeSet<EdgeId>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum TriggerTarget {
-    Node(NodeId),
-    Edge(EdgeId),
-}
-
-#[derive(Debug, Default)]
-struct EngineStepPlan {
-    resource_groups_by_controller: BTreeMap<NodeId, BTreeMap<TransferControl, Vec<EdgeId>>>,
-    passive_state_triggers: Vec<(NodeId, Vec<TriggerTarget>)>,
-    trigger_outputs_by_source: BTreeMap<NodeId, Vec<TriggerTarget>>,
-}
-
-impl EngineStepPlan {
-    fn from_compiled(compiled: &CompiledScenario) -> Self {
-        let mut plan = Self::default();
-
-        for compiled_edge in compiled.edges() {
-            let edge_id = compiled_edge.id();
-            let edge = compiled_edge.spec();
-            if !edge.enabled {
-                continue;
-            }
-
-            if matches!(edge.connection.kind, ConnectionKind::Resource) {
-                let target_action =
-                    normalized_action_mode(action_mode_for_node(compiled, &edge.to));
-                let (controller, control) = match target_action {
-                    TransferControl::PullAny | TransferControl::PullAll => {
-                        (edge.to.clone(), target_action)
-                    }
-                    TransferControl::PushAny | TransferControl::PushAll => (
-                        edge.from.clone(),
-                        normalized_action_mode(action_mode_for_node(compiled, &edge.from)),
-                    ),
-                };
-                plan.resource_groups_by_controller
-                    .entry(controller)
-                    .or_default()
-                    .entry(control)
-                    .or_default()
-                    .push(edge_id.clone());
-            }
-
-            if !matches!(edge.connection.kind, ConnectionKind::State)
-                || !matches!(edge.connection.state.role, StateConnectionRole::Trigger)
-            {
-                continue;
-            }
-
-            plan.trigger_outputs_by_source
-                .entry(edge.from.clone())
-                .or_default()
-                .extend(trigger_targets_for_state_connection(&edge.connection.state, &edge.to));
-
-            if !matches!(
-                gate_behavior_for_node(compiled, &edge.from),
-                GateBehavior::Trigger | GateBehavior::Mixed
-            ) {
-                plan.passive_state_triggers.push((
-                    edge.from.clone(),
-                    trigger_targets_for_state_connection(&edge.connection.state, &edge.to),
-                ));
-            }
-        }
-
-        plan
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -807,10 +698,10 @@ struct EdgeTransferPlan {
 #[allow(clippy::too_many_arguments)]
 fn apply_edge_transfers(
     compiled: &CompiledScenario,
-    step_plan: &EngineStepPlan,
+    step_plan: &crate::plan::RoutingPlan,
     state: &mut EngineState,
     runtime: &ExprRuntime,
-    expression_cache: &EngineExpressionCache,
+    expression_cache: &ExpressionPlanRef<'_>,
     runtime_variables: &BTreeMap<String, f64>,
     gates: &mut GateRuntimeState,
     timeline: &mut TimelineRuntimeState,
@@ -828,7 +719,7 @@ fn apply_edge_transfers(
             let gate_behavior = gate_behavior_for_node(compiled, node_id);
             let mut node_acted = false;
             let mut had_resource_groups = false;
-            let node_groups = step_plan.resource_groups_by_controller.get(node_id);
+            let controller = NodeIndex::new(node_index);
 
             for control in [
                 TransferControl::PullAny,
@@ -836,7 +727,7 @@ fn apply_edge_transfers(
                 TransferControl::PushAny,
                 TransferControl::PushAll,
             ] {
-                let Some(edge_ids) = node_groups.and_then(|groups| groups.get(&control)) else {
+                let Some(edge_ids) = step_plan.resource_group(controller, control) else {
                     continue;
                 };
                 had_resource_groups = true;
@@ -903,7 +794,7 @@ fn apply_edge_transfers(
 
             match gate_behavior {
                 GateBehavior::Mixed if node_acted => {
-                    append_node_trigger_outputs(step_plan, node_id, &mut triggers);
+                    append_node_trigger_outputs(compiled, step_plan, node_id, &mut triggers);
                 }
                 GateBehavior::Trigger => {
                     let trigger_gate_acted = if had_resource_groups {
@@ -912,7 +803,7 @@ fn apply_edge_transfers(
                         controller_can_fire(compiled, state, node_id, &[], &triggers)
                     };
                     if trigger_gate_acted {
-                        append_node_trigger_outputs(step_plan, node_id, &mut triggers);
+                        append_node_trigger_outputs(compiled, step_plan, node_id, &mut triggers);
                     }
                 }
                 GateBehavior::None | GateBehavior::Sorting | GateBehavior::Mixed => {}
@@ -932,9 +823,9 @@ fn apply_edge_transfers(
 fn apply_any_edge_group(
     compiled: &CompiledScenario,
     state: &mut EngineState,
-    edge_ids: &[EdgeId],
+    edge_ids: &[EdgeIndex],
     runtime: &ExprRuntime,
-    expression_cache: &EngineExpressionCache,
+    expression_cache: &ExpressionPlanRef<'_>,
     runtime_variables: &BTreeMap<String, f64>,
     timeline: &mut TimelineRuntimeState,
     step: u64,
@@ -942,9 +833,7 @@ fn apply_any_edge_group(
 ) -> Result<bool, RunError> {
     let mut acted = false;
     for edge_id in edge_ids {
-        let compiled_edge = compiled
-            .edge(edge_id)
-            .ok_or_else(|| compiled_plan_error(format!("missing edge projection `{edge_id}`")))?;
+        let compiled_edge = compiled.edge_at(*edge_id);
         let edge = compiled_edge.spec();
         let from_available_override =
             timeline.transfer_available_for_source(compiled, state, &edge.from)?;
@@ -974,9 +863,9 @@ fn apply_any_edge_group(
 fn apply_all_edge_group(
     compiled: &CompiledScenario,
     state: &mut EngineState,
-    edge_ids: &[EdgeId],
+    edge_ids: &[EdgeIndex],
     runtime: &ExprRuntime,
-    expression_cache: &EngineExpressionCache,
+    expression_cache: &ExpressionPlanRef<'_>,
     runtime_variables: &BTreeMap<String, f64>,
     timeline: &mut TimelineRuntimeState,
     step: u64,
@@ -987,9 +876,7 @@ fn apply_all_edge_group(
     let mut available_by_source = BTreeMap::<usize, f64>::new();
 
     for edge_id in edge_ids {
-        let compiled_edge = compiled
-            .edge(edge_id)
-            .ok_or_else(|| compiled_plan_error(format!("missing edge projection `{edge_id}`")))?;
+        let compiled_edge = compiled.edge_at(*edge_id);
         let edge = compiled_edge.spec();
         let from_available_override =
             timeline.transfer_available_for_source(compiled, state, &edge.from)?;
@@ -1044,7 +931,7 @@ fn should_use_gate_routing(
     compiled: &CompiledScenario,
     node_id: &NodeId,
     control: TransferControl,
-    edge_ids: &[EdgeId],
+    edge_ids: &[EdgeIndex],
 ) -> Result<bool, RunError> {
     if !matches!(control, TransferControl::PushAny | TransferControl::PushAll) {
         return Ok(false);
@@ -1057,10 +944,7 @@ fn should_use_gate_routing(
     }
 
     for edge_id in edge_ids {
-        let edge = compiled
-            .edge(edge_id)
-            .ok_or_else(|| compiled_plan_error(format!("missing edge projection `{edge_id}`")))?
-            .spec();
+        let edge = compiled.edge_at(*edge_id).spec();
         if edge.from != *node_id
             || !matches!(edge.connection.kind, ConnectionKind::Resource)
             || edge.connection.resource.token_size != 1
@@ -1076,10 +960,10 @@ fn apply_gate_edge_group(
     compiled: &CompiledScenario,
     state: &mut EngineState,
     node_id: &NodeId,
-    edge_ids: &[EdgeId],
+    edge_ids: &[EdgeIndex],
     control: TransferControl,
     runtime: &ExprRuntime,
-    expression_cache: &EngineExpressionCache,
+    expression_cache: &ExpressionPlanRef<'_>,
     runtime_variables: &BTreeMap<String, f64>,
     gates: &mut GateRuntimeState,
     timeline: &mut TimelineRuntimeState,
@@ -1196,9 +1080,9 @@ fn gate_routing_for_group(
     compiled: &CompiledScenario,
     state: &EngineState,
     node_id: &NodeId,
-    edge_ids: &[EdgeId],
+    edge_ids: &[EdgeIndex],
     runtime: &ExprRuntime,
-    expression_cache: &EngineExpressionCache,
+    expression_cache: &ExpressionPlanRef<'_>,
     runtime_variables: &BTreeMap<String, f64>,
 ) -> Result<Option<(GateRoutingMode, Vec<GateRoutingLane>)>, RunError> {
     let mut lanes = Vec::<GateRoutingLane>::new();
@@ -1207,9 +1091,7 @@ fn gate_routing_for_group(
     let mut seen_chance = false;
 
     for edge_id in edge_ids {
-        let compiled_edge = compiled
-            .edge(edge_id)
-            .ok_or_else(|| compiled_plan_error(format!("missing edge projection `{edge_id}`")))?;
+        let compiled_edge = compiled.edge_at(*edge_id);
         let to_index = compiled_edge.target_index();
         let from_index = compiled_edge.source_index();
         if from_index == to_index {
@@ -1238,7 +1120,7 @@ fn gate_routing_for_group(
         }
 
         lanes.push(GateRoutingLane {
-            edge_id: Some(edge_id.clone()),
+            edge_id: Some(compiled_edge.id().clone()),
             to_index: Some(to_index),
             weight,
         });
@@ -1280,7 +1162,7 @@ fn gate_weight_for_edge(
     state: &EngineState,
     compiled_edge: &CompiledEdge,
     runtime: &ExprRuntime,
-    expression_cache: &EngineExpressionCache,
+    expression_cache: &ExpressionPlanRef<'_>,
     runtime_variables: &BTreeMap<String, f64>,
 ) -> Result<Option<(GateWeightKind, f64)>, RunError> {
     let edge = compiled_edge.spec();
@@ -1325,7 +1207,7 @@ fn plan_edge_transfer_any(
     state: &EngineState,
     compiled_edge: &CompiledEdge,
     runtime: &ExprRuntime,
-    expression_cache: &EngineExpressionCache,
+    expression_cache: &ExpressionPlanRef<'_>,
     runtime_variables: &BTreeMap<String, f64>,
     from_value_override: Option<f64>,
 ) -> Result<Option<EdgeTransferPlan>, RunError> {
@@ -1369,7 +1251,7 @@ fn plan_edge_transfer_all(
     state: &EngineState,
     compiled_edge: &CompiledEdge,
     runtime: &ExprRuntime,
-    expression_cache: &EngineExpressionCache,
+    expression_cache: &ExpressionPlanRef<'_>,
     runtime_variables: &BTreeMap<String, f64>,
     from_value_override: Option<f64>,
 ) -> Result<Option<EdgeTransferPlan>, RunError> {
@@ -1444,57 +1326,47 @@ fn apply_transfer_plan(
 
 fn collect_step_triggers(
     compiled: &CompiledScenario,
-    step_plan: &EngineStepPlan,
+    step_plan: &crate::plan::RoutingPlan,
     state: &EngineState,
 ) -> StepTriggers {
     let mut triggers = StepTriggers::default();
 
-    for (source_node_id, targets) in &step_plan.passive_state_triggers {
-        let source_state = node_value(compiled, state, source_node_id);
+    for (source_node_index, targets) in step_plan.passive_state_triggers() {
+        let source_state = state.node_values[source_node_index.value()];
         if !source_state.is_finite() || source_state <= 0.0 {
             continue;
         }
-        append_trigger_targets(targets, &mut triggers);
+        append_trigger_targets(compiled, targets, &mut triggers);
     }
 
     triggers
 }
 
 fn append_node_trigger_outputs(
-    step_plan: &EngineStepPlan,
+    compiled: &CompiledScenario,
+    step_plan: &crate::plan::RoutingPlan,
     node_id: &NodeId,
     triggers: &mut StepTriggers,
 ) {
-    if let Some(targets) = step_plan.trigger_outputs_by_source.get(node_id) {
-        append_trigger_targets(targets, triggers);
-    }
-}
-
-fn trigger_targets_for_state_connection(
-    state_config: &crate::types::StateConnectionConfig,
-    edge_to: &NodeId,
-) -> Vec<TriggerTarget> {
-    match state_config.target {
-        StateConnectionTarget::Node => vec![TriggerTarget::Node(edge_to.clone())],
-        StateConnectionTarget::ResourceConnection | StateConnectionTarget::StateConnection => {
-            if let Some(target_edge_id) = state_config.target_connection.clone() {
-                vec![TriggerTarget::Edge(target_edge_id)]
-            } else {
-                Vec::new()
-            }
+    if let Some(node_index) = compiled.node_index(node_id) {
+        if let Some(targets) = step_plan.trigger_outputs(NodeIndex::new(node_index)) {
+            append_trigger_targets(compiled, targets, triggers);
         }
-        StateConnectionTarget::Formula => Vec::new(),
     }
 }
 
-fn append_trigger_targets(targets: &[TriggerTarget], triggers: &mut StepTriggers) {
+fn append_trigger_targets(
+    compiled: &CompiledScenario,
+    targets: &[TriggerTarget],
+    triggers: &mut StepTriggers,
+) {
     for target in targets {
         match target {
-            TriggerTarget::Node(node_id) => {
-                triggers.nodes.insert(node_id.clone());
+            TriggerTarget::Node(node_index) => {
+                triggers.nodes.insert(compiled.node_id_at_index(*node_index).clone());
             }
-            TriggerTarget::Edge(edge_id) => {
-                triggers.edges.insert(edge_id.clone());
+            TriggerTarget::Edge(edge_index) => {
+                triggers.edges.insert(compiled.edge_at(*edge_index).id().clone());
             }
         }
     }
@@ -1504,7 +1376,7 @@ fn controller_can_fire(
     compiled: &CompiledScenario,
     state: &EngineState,
     node_id: &NodeId,
-    edge_ids: &[EdgeId],
+    edge_ids: &[EdgeIndex],
     triggers: &StepTriggers,
 ) -> bool {
     match trigger_mode_for_node(compiled, node_id) {
@@ -1513,7 +1385,9 @@ fn controller_can_fire(
         TriggerMode::Enabling => state.step == 0,
         TriggerMode::Passive => {
             triggers.nodes.contains(node_id)
-                || edge_ids.iter().any(|edge_id| triggers.edges.contains(edge_id))
+                || edge_ids
+                    .iter()
+                    .any(|edge_id| triggers.edges.contains(compiled.edge_at(*edge_id).id()))
         }
         TriggerMode::Custom(_) => true,
     }
@@ -1531,11 +1405,6 @@ fn gate_behavior_for_node(compiled: &CompiledScenario, node_id: &NodeId) -> Gate
         NodeKind::MixedGate => GateBehavior::Mixed,
         _ => GateBehavior::None,
     }
-}
-
-fn action_mode_for_node(compiled: &CompiledScenario, node_id: &NodeId) -> ActionMode {
-    let mode = node_mode_for_node(compiled, node_id);
-    mode.map(|m| m.action_mode.clone()).unwrap_or(ActionMode::PushAny)
 }
 
 fn node_kind_for_node<'a>(compiled: &'a CompiledScenario, node_id: &NodeId) -> &'a NodeKind {
@@ -1617,20 +1486,11 @@ fn node_mode_for_node<'a>(
     }
 }
 
-fn normalized_action_mode(mode: ActionMode) -> TransferControl {
-    match mode {
-        ActionMode::PullAny => TransferControl::PullAny,
-        ActionMode::PullAll => TransferControl::PullAll,
-        ActionMode::PushAll => TransferControl::PushAll,
-        ActionMode::PushAny | ActionMode::Custom(_) => TransferControl::PushAny,
-    }
-}
-
 fn apply_state_connections(
     compiled: &CompiledScenario,
     state: &mut EngineState,
     runtime: &ExprRuntime,
-    expression_cache: &EngineExpressionCache,
+    expression_cache: &ExpressionPlanRef<'_>,
     runtime_variables: &BTreeMap<String, f64>,
 ) -> Result<(), RunError> {
     let mut next_step_node_deltas = vec![0.0; state.node_values.len()];
@@ -1698,7 +1558,7 @@ fn transfer_request(
     compiled_edge: &CompiledEdge,
     from_value: f64,
     runtime: &ExprRuntime,
-    expression_cache: &EngineExpressionCache,
+    expression_cache: &ExpressionPlanRef<'_>,
     runtime_variables: &BTreeMap<String, f64>,
 ) -> Result<f64, RunError> {
     let edge = compiled_edge.spec();
@@ -1842,7 +1702,7 @@ fn evaluate_state_formula_delta(
     source_state: f64,
     target_state: f64,
     runtime: &ExprRuntime,
-    expression_cache: &EngineExpressionCache,
+    expression_cache: &ExpressionPlanRef<'_>,
     runtime_variables: &BTreeMap<String, f64>,
 ) -> Result<Option<f64>, RunError> {
     let Some(compiled_expression) = expression_cache.state_expression(edge_id) else {
