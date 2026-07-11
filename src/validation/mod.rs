@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 
 use crate::error::SetupError;
 use crate::expr::ExprRuntime;
+use crate::plan::{CompiledEdge, CompiledNode, EdgeIndex, NodeIndex, PlanIndexes, PlanProjections};
 use crate::types::{
     BatchConfig, BatchRunTemplate, ConnectionKind, DelayNodeConfig, EdgeId, EdgeSpec,
     EndConditionSpec, MetricKey, NodeConfig, NodeId, NodeKind, NodeSpec, QueueNodeConfig,
@@ -17,26 +18,16 @@ use crate::types::{
     TransferSpec, VariableSourceSpec,
 };
 
-/// Validated scenario plus ordered node/edge indexes for deterministic execution.
-///
-/// Indexes follow `BTreeMap` key order of the original spec so equal specs compile
-/// to equal layouts across platforms.
-#[derive(Debug, Clone, PartialEq)]
-pub struct CompiledScenario {
-    pub scenario: ScenarioSpec,
-    pub node_order: Vec<NodeId>,
-    pub edge_order: Vec<EdgeId>,
-    pub node_index_by_id: BTreeMap<NodeId, usize>,
-    pub edge_index_by_id: BTreeMap<EdgeId, usize>,
-    pub metric_index_by_name: BTreeMap<String, usize>,
-}
-
 /// Validates structural invariants and builds deterministic iteration indexes.
 ///
 /// # Errors
 /// Returns [`SetupError`] for missing graph references, resource cycles, invalid
 /// parameters, or end-condition/metric reference failures.
 pub fn compile_scenario(spec: &ScenarioSpec) -> Result<CompiledScenario, SetupError> {
+    compile_scenario_owned(spec.clone())
+}
+
+fn compile_scenario_owned(spec: ScenarioSpec) -> Result<CompiledScenario, SetupError> {
     for (edge_id, edge) in &spec.edges {
         if !spec.nodes.contains_key(&edge.from) {
             return Err(SetupError::InvalidGraphReference {
@@ -44,7 +35,7 @@ pub fn compile_scenario(spec: &ScenarioSpec) -> Result<CompiledScenario, SetupEr
                 reference: with_available_ids_hint(
                     format!("edges.{edge_id}.from references missing nodes.{}", edge.from),
                     "node IDs",
-                    available_node_ids(spec),
+                    available_node_ids(&spec),
                 ),
             });
         }
@@ -54,7 +45,7 @@ pub fn compile_scenario(spec: &ScenarioSpec) -> Result<CompiledScenario, SetupEr
                 reference: with_available_ids_hint(
                     format!("edges.{edge_id}.to references missing nodes.{}", edge.to),
                     "node IDs",
-                    available_node_ids(spec),
+                    available_node_ids(&spec),
                 ),
             });
         }
@@ -63,43 +54,62 @@ pub fn compile_scenario(spec: &ScenarioSpec) -> Result<CompiledScenario, SetupEr
     for (index, condition) in spec.end_conditions.iter().enumerate() {
         let path = format!("end_conditions[{index}]");
         validate_end_condition_shape(condition, &path)?;
-        validate_end_condition_references(spec, condition, &path)?;
+        validate_end_condition_references(&spec, condition, &path)?;
     }
-    validate_transfer_metric_references(spec)?;
-    validate_tracked_metric_references(spec)?;
-    validate_resource_connection_cycles(spec)?;
-    validate_connection_invariants(spec)?;
-    validate_node_invariants(spec)?;
-    validate_variable_sources(spec)?;
+    validate_transfer_metric_references(&spec)?;
+    validate_tracked_metric_references(&spec)?;
+    validate_resource_connection_cycles(&spec)?;
+    validate_connection_invariants(&spec)?;
+    validate_node_invariants(&spec)?;
+    validate_variable_sources(&spec)?;
 
-    let node_order = spec.nodes.keys().cloned().collect::<Vec<_>>();
-    let edge_order = spec.edges.keys().cloned().collect::<Vec<_>>();
+    let node_ids = spec.nodes.keys().cloned().collect::<Box<[_]>>();
+    let edge_ids = spec.edges.keys().cloned().collect::<Box<[_]>>();
 
-    let node_index_by_id = node_order
+    let node_index_by_id: BTreeMap<NodeId, NodeIndex> = node_ids
         .iter()
         .enumerate()
-        .map(|(index, node_id)| (node_id.clone(), index))
-        .collect::<BTreeMap<_, _>>();
-    let edge_index_by_id = edge_order
+        .map(|(index, node_id)| (node_id.clone(), NodeIndex::new(index)))
+        .collect();
+    let edge_index_by_id: BTreeMap<EdgeId, EdgeIndex> = edge_ids
         .iter()
         .enumerate()
-        .map(|(index, edge_id)| (edge_id.clone(), index))
-        .collect::<BTreeMap<_, _>>();
-    let metric_index_by_name = node_order
+        .map(|(index, edge_id)| (edge_id.clone(), EdgeIndex::new(index)))
+        .collect();
+    let metric_index_by_name: BTreeMap<String, NodeIndex> = node_ids
         .iter()
         .enumerate()
-        .map(|(index, node_id)| (node_id.as_str().to_string(), index))
-        .collect::<BTreeMap<_, _>>();
+        .map(|(index, node_id)| (node_id.as_str().to_string(), NodeIndex::new(index)))
+        .collect();
 
-    Ok(CompiledScenario {
-        scenario: spec.clone(),
-        node_order,
-        edge_order,
-        node_index_by_id,
-        edge_index_by_id,
-        metric_index_by_name,
-    })
+    let nodes =
+        node_ids.iter().map(|id| CompiledNode::new(id.clone(), spec.nodes[id].clone())).collect();
+    let edges = edge_ids
+        .iter()
+        .map(|id| {
+            let edge = spec.edges[id].clone();
+            let from_index = node_index_by_id[&edge.from].value();
+            let to_index = node_index_by_id[&edge.to].value();
+            CompiledEdge::new(id.clone(), edge, from_index, to_index)
+        })
+        .collect();
+
+    Ok(CompiledScenario::from_validated(
+        spec,
+        PlanProjections::new(node_ids, edge_ids, nodes, edges),
+        PlanIndexes::new(node_index_by_id, edge_index_by_id, metric_index_by_name),
+    ))
 }
+
+impl TryFrom<ScenarioSpec> for CompiledScenario {
+    type Error = SetupError;
+
+    fn try_from(spec: ScenarioSpec) -> Result<Self, Self::Error> {
+        compile_scenario_owned(spec)
+    }
+}
+
+pub use crate::plan::CompiledScenario;
 
 /// Rejects zero `max_steps` or zero capture strides on a [`RunConfig`].
 pub fn validate_run_config(config: &RunConfig) -> Result<(), SetupError> {
@@ -882,13 +892,13 @@ mod tests {
 
         let compiled = compile_scenario(&spec).expect("scenario should compile");
 
-        assert_eq!(compiled.node_order, vec![node_a_id.clone(), node_m_id.clone(), node_z_id]);
-        assert_eq!(compiled.edge_order, vec![edge_a_id.clone(), edge_m_id.clone(), edge_z_id]);
-        assert_eq!(compiled.node_index_by_id.get(&node_a_id), Some(&0));
-        assert_eq!(compiled.node_index_by_id.get(&node_m_id), Some(&1));
-        assert_eq!(compiled.edge_index_by_id.get(&edge_a_id), Some(&0));
-        assert_eq!(compiled.edge_index_by_id.get(&edge_m_id), Some(&1));
-        assert_eq!(compiled.scenario, spec);
+        assert_eq!(compiled.node_ids(), &[node_a_id.clone(), node_m_id.clone(), node_z_id]);
+        assert_eq!(compiled.edge_ids(), &[edge_a_id.clone(), edge_m_id.clone(), edge_z_id]);
+        assert_eq!(compiled.node_index(&node_a_id), Some(0));
+        assert_eq!(compiled.node_index(&node_m_id), Some(1));
+        assert_eq!(compiled.edge_index(&edge_a_id), Some(0));
+        assert_eq!(compiled.edge_index(&edge_m_id), Some(1));
+        assert_eq!(compiled.source_spec(), &spec);
     }
 
     #[test]

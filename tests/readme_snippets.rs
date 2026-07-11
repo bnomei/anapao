@@ -23,7 +23,7 @@ fn readme_s02_compile_scenario() {
         .with_end_condition(EndConditionSpec::MaxSteps { steps: 3 });
 
     let compiled = Simulator::compile(scenario).expect("compile source_sink scenario");
-    assert_eq!(compiled.scenario.id.as_str(), "scenario-source-sink");
+    assert_eq!(compiled.scenario_id().as_str(), "scenario-source-sink");
 }
 
 #[test]
@@ -74,7 +74,7 @@ fn readme_contains_curated_builder_snippet_signatures() {
         "### Snippet S01 — Build a Minimal Scenario",
         "let mut scenario = ScenarioSpec::source_sink(TransferSpec::Fixed { amount: 1.0 })",
         "### Snippet S02 — Compile a Scenario",
-        "assert_eq!(compiled.scenario.id.as_str(), \"scenario-source-sink\");",
+        "assert_eq!(compiled.scenario_id().as_str(), \"scenario-source-sink\");",
         "### Snippet S03 — Create a Deterministic RunConfig",
         "let run = RunConfig::for_seed(42).with_max_steps(250).with_capture(CaptureConfig {",
         "### Snippet S07 — Create BatchConfig",

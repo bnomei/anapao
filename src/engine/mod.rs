@@ -14,6 +14,7 @@ use crate::events::{
     TransferEvent,
 };
 use crate::expr::{CompiledExpr, ExprError, ExprRuntime};
+use crate::plan::CompiledEdge;
 use crate::rng::{rng_from_seed, BaseRng};
 use crate::stochastic::{
     sample_chance_percent, sample_closed_interval, sample_from_list, sample_from_matrix,
@@ -25,7 +26,7 @@ use crate::types::{
     StateConnectionRole, StateConnectionTarget, TransferRecord, TransferSpec, TriggerMode,
     VariableSnapshot, VariableSourceSpec, VariableUpdateTiming,
 };
-use crate::validation::CompiledScenario;
+use crate::CompiledScenario;
 
 const VALUE_SCALE: f64 = 1_000_000.0;
 const VARIABLE_RNG_SALT: u64 = 0xA11C_E5E0_0023_0001;
@@ -50,8 +51,8 @@ struct VariableRuntimeState {
 impl VariableRuntimeState {
     fn from_compiled(compiled: &CompiledScenario, seed: u64) -> Self {
         Self {
-            timing: compiled.scenario.variables.update_timing.clone(),
-            sources: compiled.scenario.variables.sources.clone(),
+            timing: compiled.variables().update_timing.clone(),
+            sources: compiled.variables().sources.clone(),
             values: BTreeMap::new(),
             rng: rng_from_seed(seed ^ VARIABLE_RNG_SALT),
         }
@@ -92,10 +93,9 @@ impl EngineExpressionCache {
     fn from_compiled(compiled: &CompiledScenario, runtime: &ExprRuntime) -> Result<Self, RunError> {
         let mut cache = Self::default();
 
-        for edge_id in &compiled.edge_order {
-            let Some(edge) = compiled.scenario.edges.get(edge_id) else {
-                continue;
-            };
+        for edge in compiled.edges() {
+            let edge_id = edge.id();
+            let edge = edge.spec();
             if !edge.enabled {
                 continue;
             }
@@ -238,13 +238,8 @@ enum GateLaneKey {
     Edge(EdgeId),
 }
 
-fn edge_to_node_id(compiled: &CompiledScenario, edge_id: &EdgeId) -> NodeId {
-    compiled
-        .scenario
-        .edges
-        .get(edge_id)
-        .map(|edge| edge.to.clone())
-        .unwrap_or_else(|| NodeId::fixture("unknown-node"))
+fn compiled_plan_error(detail: impl Into<String>) -> RunError {
+    RunError::InvalidRunConfig { name: "compiled_plan".to_string(), reason: detail.into() }
 }
 
 #[derive(Debug, Clone)]
@@ -290,9 +285,8 @@ impl TimelineRuntimeState {
     fn from_compiled(compiled: &CompiledScenario, state: &EngineState) -> Self {
         let mut runtime = Self::default();
 
-        for (index, node_id) in compiled.node_order.iter().enumerate() {
-            let value =
-                canonicalize_float(state.node_values.get(index).copied().unwrap_or(0.0).max(0.0));
+        for (index, (node_id, _)) in compiled.nodes().enumerate() {
+            let value = canonicalize_float(state.node_values[index].max(0.0));
             if value <= 0.0 {
                 continue;
             }
@@ -317,7 +311,7 @@ impl TimelineRuntimeState {
     fn begin_step(&mut self, compiled: &CompiledScenario, step: u64) {
         self.release_budgets.clear();
 
-        for node_id in &compiled.node_order {
+        for node_id in compiled.node_ids() {
             match timeline_node_kind(compiled, node_id) {
                 Some(TimelineNodeKind::Delay) => {
                     let mut newly_ready = 0.0;
@@ -376,19 +370,18 @@ impl TimelineRuntimeState {
         compiled: &CompiledScenario,
         state: &EngineState,
         node_id: &NodeId,
-    ) -> Option<f64> {
-        timeline_node_kind(compiled, node_id)?;
+    ) -> Result<Option<f64>, RunError> {
+        if timeline_node_kind(compiled, node_id).is_none() {
+            return Ok(None);
+        }
 
         let budget =
             canonicalize_float(self.release_budgets.get(node_id).copied().unwrap_or(0.0).max(0.0));
-        let available = compiled
-            .node_index_by_id
-            .get(node_id)
-            .and_then(|index| state.node_values.get(*index))
-            .copied()
-            .unwrap_or(0.0)
-            .max(0.0);
-        Some(canonicalize_float(available.min(budget)))
+        let index = compiled
+            .node_index(node_id)
+            .ok_or_else(|| compiled_plan_error(format!("missing node projection `{node_id}`")))?;
+        let available = state.node_values[index].max(0.0);
+        Ok(Some(canonicalize_float(available.min(budget))))
     }
 
     fn record_release(&mut self, compiled: &CompiledScenario, node_id: &NodeId, transfer: f64) {
@@ -470,21 +463,12 @@ fn sample_variable_source(source: &VariableSourceSpec, rng: &mut BaseRng) -> Opt
 /// Builds initial engine state from compiled node defaults and tracked metrics.
 pub fn init_state(compiled: &CompiledScenario) -> EngineState {
     let node_values = compiled
-        .node_order
-        .iter()
-        .map(|node_id| {
-            let node = compiled
-                .scenario
-                .nodes
-                .get(node_id)
-                .expect("compiled.node_order must reference known nodes");
-            canonicalize_float(node.initial_value)
-        })
+        .nodes()
+        .map(|(_, node)| canonicalize_float(node.initial_value))
         .collect::<Vec<_>>();
 
     let metrics = compiled
-        .scenario
-        .tracked_metrics
+        .tracked_metrics()
         .iter()
         .cloned()
         .map(|metric| (metric, 0.0))
@@ -535,7 +519,7 @@ fn run_single_internal(
 ) -> Result<RunReport, RunError> {
     validate_capture_selection(compiled, config)?;
 
-    let mut report = RunReport::new(compiled.scenario.id.clone(), config.seed);
+    let mut report = RunReport::new(compiled.scenario_id().clone(), config.seed);
     let mut state = init_state(compiled);
     let runtime = ExprRuntime::new();
     let expression_cache = EngineExpressionCache::from_compiled(compiled, &runtime)?;
@@ -662,11 +646,11 @@ fn run_single_internal(
     report.steps_executed = state.step;
     report.completed = completed;
     report.final_node_values = compiled
-        .node_order
+        .node_ids()
         .iter()
         .enumerate()
         .map(|(index, node_id)| {
-            let value = state.node_values.get(index).copied().unwrap_or(0.0);
+            let value = state.node_values[index];
             (node_id.clone(), canonicalize_float(value))
         })
         .collect::<BTreeMap<_, _>>();
@@ -702,12 +686,7 @@ fn formula_run_error(name: String, error: ExprError) -> RunError {
 }
 
 fn apply_source_generation(compiled: &CompiledScenario, state: &mut EngineState) {
-    for (index, node_id) in compiled.node_order.iter().enumerate() {
-        let node = compiled
-            .scenario
-            .nodes
-            .get(node_id)
-            .expect("compiled.node_order must reference known nodes");
+    for (index, (_, node)) in compiled.nodes().enumerate() {
         if !matches!(node.kind, NodeKind::Source) {
             continue;
         }
@@ -717,9 +696,8 @@ fn apply_source_generation(compiled: &CompiledScenario, state: &mut EngineState)
             continue;
         }
 
-        if let Some(value) = state.node_values.get_mut(index) {
-            *value = canonicalize_float(*value + generation);
-        }
+        let value = &mut state.node_values[index];
+        *value = canonicalize_float(*value + generation);
     }
 }
 
@@ -754,10 +732,9 @@ impl EngineStepPlan {
     fn from_compiled(compiled: &CompiledScenario) -> Self {
         let mut plan = Self::default();
 
-        for edge_id in &compiled.edge_order {
-            let Some(edge) = compiled.scenario.edges.get(edge_id) else {
-                continue;
-            };
+        for compiled_edge in compiled.edges() {
+            let edge_id = compiled_edge.id();
+            let edge = compiled_edge.spec();
             if !edge.enabled {
                 continue;
             }
@@ -847,7 +824,7 @@ fn apply_edge_transfers(
         let mut progress = false;
         let triggers_before = triggers.nodes.len() + triggers.edges.len();
 
-        for (node_index, node_id) in compiled.node_order.iter().enumerate() {
+        for (node_index, node_id) in compiled.node_ids().iter().enumerate() {
             let gate_behavior = gate_behavior_for_node(compiled, node_id);
             let mut node_acted = false;
             let mut had_resource_groups = false;
@@ -875,7 +852,7 @@ fn apply_edge_transfers(
                 settled_groups.insert((node_index, control));
                 progress = true;
 
-                let acted = if should_use_gate_routing(compiled, node_id, control, edge_ids) {
+                let acted = if should_use_gate_routing(compiled, node_id, control, edge_ids)? {
                     apply_gate_edge_group(
                         compiled,
                         state,
@@ -965,15 +942,16 @@ fn apply_any_edge_group(
 ) -> Result<bool, RunError> {
     let mut acted = false;
     for edge_id in edge_ids {
-        let Some(edge) = compiled.scenario.edges.get(edge_id) else {
-            continue;
-        };
+        let compiled_edge = compiled
+            .edge(edge_id)
+            .ok_or_else(|| compiled_plan_error(format!("missing edge projection `{edge_id}`")))?;
+        let edge = compiled_edge.spec();
         let from_available_override =
-            timeline.transfer_available_for_source(compiled, state, &edge.from);
+            timeline.transfer_available_for_source(compiled, state, &edge.from)?;
         let Some(plan) = plan_edge_transfer_any(
             compiled,
             state,
-            edge,
+            compiled_edge,
             runtime,
             expression_cache,
             runtime_variables,
@@ -982,7 +960,7 @@ fn apply_any_edge_group(
         else {
             continue;
         };
-        apply_transfer_plan(compiled, state, plan, timeline, step, transfer_log);
+        apply_transfer_plan(compiled, state, plan, timeline, step, transfer_log)?;
         acted = true;
     }
     Ok(acted)
@@ -1009,15 +987,16 @@ fn apply_all_edge_group(
     let mut available_by_source = BTreeMap::<usize, f64>::new();
 
     for edge_id in edge_ids {
-        let Some(edge) = compiled.scenario.edges.get(edge_id) else {
-            return Ok(false);
-        };
+        let compiled_edge = compiled
+            .edge(edge_id)
+            .ok_or_else(|| compiled_plan_error(format!("missing edge projection `{edge_id}`")))?;
+        let edge = compiled_edge.spec();
         let from_available_override =
-            timeline.transfer_available_for_source(compiled, state, &edge.from);
+            timeline.transfer_available_for_source(compiled, state, &edge.from)?;
         let Some(plan) = plan_edge_transfer_all(
             compiled,
             state,
-            edge,
+            compiled_edge,
             runtime,
             expression_cache,
             runtime_variables,
@@ -1028,9 +1007,7 @@ fn apply_all_edge_group(
         };
 
         let available = canonicalize_float(
-            from_available_override
-                .unwrap_or_else(|| state.node_values.get(plan.from_index).copied().unwrap_or(0.0))
-                .max(0.0),
+            from_available_override.unwrap_or(state.node_values[plan.from_index]).max(0.0),
         );
         available_by_source.entry(plan.from_index).or_insert(available);
 
@@ -1043,14 +1020,14 @@ fn apply_all_edge_group(
         let available = available_by_source
             .get(&from_index)
             .copied()
-            .unwrap_or_else(|| state.node_values.get(from_index).copied().unwrap_or(0.0).max(0.0));
+            .unwrap_or(state.node_values[from_index].max(0.0));
         if canonicalize_float(available) + f64::EPSILON < requested_total {
             return Ok(false);
         }
     }
 
     for plan in plans {
-        apply_transfer_plan(compiled, state, plan, timeline, step, transfer_log);
+        apply_transfer_plan(compiled, state, plan, timeline, step, transfer_log)?;
     }
 
     Ok(true)
@@ -1068,25 +1045,30 @@ fn should_use_gate_routing(
     node_id: &NodeId,
     control: TransferControl,
     edge_ids: &[EdgeId],
-) -> bool {
+) -> Result<bool, RunError> {
     if !matches!(control, TransferControl::PushAny | TransferControl::PushAll) {
-        return false;
+        return Ok(false);
     }
     if !matches!(
         gate_behavior_for_node(compiled, node_id),
         GateBehavior::Sorting | GateBehavior::Mixed
     ) {
-        return false;
+        return Ok(false);
     }
 
-    edge_ids.iter().all(|edge_id| {
-        let Some(edge) = compiled.scenario.edges.get(edge_id) else {
-            return false;
-        };
-        edge.from == *node_id
-            && matches!(edge.connection.kind, ConnectionKind::Resource)
-            && edge.connection.resource.token_size == 1
-    })
+    for edge_id in edge_ids {
+        let edge = compiled
+            .edge(edge_id)
+            .ok_or_else(|| compiled_plan_error(format!("missing edge projection `{edge_id}`")))?
+            .spec();
+        if edge.from != *node_id
+            || !matches!(edge.connection.kind, ConnectionKind::Resource)
+            || edge.connection.resource.token_size != 1
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1142,11 +1124,10 @@ fn apply_gate_edge_group(
         }
     };
 
-    let Some(&from_index) = compiled.node_index_by_id.get(node_id) else {
-        return Ok(false);
-    };
-    let available_tokens =
-        state.node_values.get(from_index).copied().unwrap_or(0.0).max(0.0).floor() as u64;
+    let from_index = compiled
+        .node_index(node_id)
+        .ok_or_else(|| compiled_plan_error(format!("missing node projection `{node_id}`")))?;
+    let available_tokens = state.node_values[from_index].max(0.0).floor() as u64;
     if available_tokens == 0 {
         return Ok(false);
     }
@@ -1165,10 +1146,9 @@ fn apply_gate_edge_group(
         };
 
         if lane.edge_id.is_none() {
-            if let Some(value) = state.node_values.get_mut(from_index) {
-                *value = canonicalize_float(*value - 1.0);
-                acted = true;
-            }
+            let value = &mut state.node_values[from_index];
+            *value = canonicalize_float(*value - 1.0);
+            acted = true;
             continue;
         }
 
@@ -1188,10 +1168,11 @@ fn apply_gate_edge_group(
                 edge_id: selected_edge_id.clone(),
                 from_node_id: node_id.clone(),
                 to_node_id: compiled
-                    .node_order
-                    .get(to_index)
-                    .cloned()
-                    .unwrap_or_else(|| edge_to_node_id(compiled, selected_edge_id)),
+                    .node_id_at(to_index)
+                    .ok_or_else(|| {
+                        compiled_plan_error(format!("missing node projection at index {to_index}"))
+                    })?
+                    .clone(),
                 from_index,
                 to_index,
                 requested: 1.0,
@@ -1200,7 +1181,7 @@ fn apply_gate_edge_group(
             timeline,
             step,
             transfer_log,
-        );
+        )?;
         acted = true;
     }
 
@@ -1226,15 +1207,11 @@ fn gate_routing_for_group(
     let mut seen_chance = false;
 
     for edge_id in edge_ids {
-        let Some(edge) = compiled.scenario.edges.get(edge_id) else {
-            return Ok(None);
-        };
-        let Some(&to_index) = compiled.node_index_by_id.get(&edge.to) else {
-            return Ok(None);
-        };
-        let Some(&from_index) = compiled.node_index_by_id.get(&edge.from) else {
-            return Ok(None);
-        };
+        let compiled_edge = compiled
+            .edge(edge_id)
+            .ok_or_else(|| compiled_plan_error(format!("missing edge projection `{edge_id}`")))?;
+        let to_index = compiled_edge.target_index();
+        let from_index = compiled_edge.source_index();
         if from_index == to_index {
             continue;
         }
@@ -1242,7 +1219,7 @@ fn gate_routing_for_group(
         let Some((kind, weight)) = gate_weight_for_edge(
             compiled,
             state,
-            edge,
+            compiled_edge,
             runtime,
             expression_cache,
             runtime_variables,
@@ -1301,11 +1278,12 @@ fn gate_routing_for_group(
 fn gate_weight_for_edge(
     compiled: &CompiledScenario,
     state: &EngineState,
-    edge: &crate::types::EdgeSpec,
+    compiled_edge: &CompiledEdge,
     runtime: &ExprRuntime,
     expression_cache: &EngineExpressionCache,
     runtime_variables: &BTreeMap<String, f64>,
 ) -> Result<Option<(GateWeightKind, f64)>, RunError> {
+    let edge = compiled_edge.spec();
     match &edge.transfer {
         TransferSpec::Fixed { amount } => {
             Ok(amount.is_finite().then_some((GateWeightKind::Ratio, canonicalize_float(*amount))))
@@ -1324,11 +1302,11 @@ fn gate_weight_for_edge(
             Ok(weight.is_finite().then_some((GateWeightKind::Chance, canonicalize_float(weight))))
         }
         TransferSpec::Expression { .. } => {
-            let from_value = node_value(compiled, state, &edge.from);
+            let from_value = state.node_values[compiled_edge.source_index()];
             let requested = transfer_request(
                 compiled,
                 state,
-                edge,
+                compiled_edge,
                 from_value,
                 runtime,
                 expression_cache,
@@ -1345,31 +1323,25 @@ fn gate_weight_for_edge(
 fn plan_edge_transfer_any(
     compiled: &CompiledScenario,
     state: &EngineState,
-    edge: &crate::types::EdgeSpec,
+    compiled_edge: &CompiledEdge,
     runtime: &ExprRuntime,
     expression_cache: &EngineExpressionCache,
     runtime_variables: &BTreeMap<String, f64>,
     from_value_override: Option<f64>,
 ) -> Result<Option<EdgeTransferPlan>, RunError> {
-    let Some(&from_index) = compiled.node_index_by_id.get(&edge.from) else {
-        return Ok(None);
-    };
-    let Some(&to_index) = compiled.node_index_by_id.get(&edge.to) else {
-        return Ok(None);
-    };
+    let edge = compiled_edge.spec();
+    let from_index = compiled_edge.source_index();
+    let to_index = compiled_edge.target_index();
     if from_index == to_index {
         return Ok(None);
     }
 
-    let from_value = canonicalize_float(
-        from_value_override
-            .unwrap_or_else(|| state.node_values.get(from_index).copied().unwrap_or(0.0))
-            .max(0.0),
-    );
+    let from_value =
+        canonicalize_float(from_value_override.unwrap_or(state.node_values[from_index]).max(0.0));
     let requested = transfer_request(
         compiled,
         state,
-        edge,
+        compiled_edge,
         from_value,
         runtime,
         expression_cache,
@@ -1382,7 +1354,7 @@ fn plan_edge_transfer_any(
     }
 
     Ok(Some(EdgeTransferPlan {
-        edge_id: edge.id.clone(),
+        edge_id: compiled_edge.id().clone(),
         from_node_id: edge.from.clone(),
         to_node_id: edge.to.clone(),
         from_index,
@@ -1395,31 +1367,25 @@ fn plan_edge_transfer_any(
 fn plan_edge_transfer_all(
     compiled: &CompiledScenario,
     state: &EngineState,
-    edge: &crate::types::EdgeSpec,
+    compiled_edge: &CompiledEdge,
     runtime: &ExprRuntime,
     expression_cache: &EngineExpressionCache,
     runtime_variables: &BTreeMap<String, f64>,
     from_value_override: Option<f64>,
 ) -> Result<Option<EdgeTransferPlan>, RunError> {
-    let Some(&from_index) = compiled.node_index_by_id.get(&edge.from) else {
-        return Ok(None);
-    };
-    let Some(&to_index) = compiled.node_index_by_id.get(&edge.to) else {
-        return Ok(None);
-    };
+    let edge = compiled_edge.spec();
+    let from_index = compiled_edge.source_index();
+    let to_index = compiled_edge.target_index();
     if from_index == to_index {
         return Ok(None);
     }
 
-    let from_value = canonicalize_float(
-        from_value_override
-            .unwrap_or_else(|| state.node_values.get(from_index).copied().unwrap_or(0.0))
-            .max(0.0),
-    );
+    let from_value =
+        canonicalize_float(from_value_override.unwrap_or(state.node_values[from_index]).max(0.0));
     let requested = transfer_request(
         compiled,
         state,
-        edge,
+        compiled_edge,
         from_value,
         runtime,
         expression_cache,
@@ -1431,7 +1397,7 @@ fn plan_edge_transfer_all(
     }
 
     Ok(Some(EdgeTransferPlan {
-        edge_id: edge.id.clone(),
+        edge_id: compiled_edge.id().clone(),
         from_node_id: edge.from.clone(),
         to_node_id: edge.to.clone(),
         from_index,
@@ -1448,22 +1414,22 @@ fn apply_transfer_plan(
     timeline: &mut TimelineRuntimeState,
     step: u64,
     transfer_log: &mut Vec<TransferRecord>,
-) {
-    let transfer = accepted_arrival(compiled, state, plan.to_index, plan.transfer);
+) -> Result<(), RunError> {
+    let transfer = accepted_arrival(compiled, state, plan.to_index, plan.transfer)?;
 
-    if let Some(value) = state.node_values.get_mut(plan.from_index) {
-        *value = canonicalize_float(*value - transfer);
-    }
-    if let Some(value) = state.node_values.get_mut(plan.to_index) {
-        *value = canonicalize_float(*value + transfer);
-    }
+    state.node_values[plan.from_index] =
+        canonicalize_float(state.node_values[plan.from_index] - transfer);
+    state.node_values[plan.to_index] =
+        canonicalize_float(state.node_values[plan.to_index] + transfer);
 
-    if let Some(node_id) = compiled.node_order.get(plan.from_index) {
-        timeline.record_release(compiled, node_id, transfer);
-    }
-    if let Some(node_id) = compiled.node_order.get(plan.to_index) {
-        timeline.record_arrival(compiled, node_id, transfer, step);
-    }
+    let from_node_id = compiled.node_id_at(plan.from_index).ok_or_else(|| {
+        compiled_plan_error(format!("missing node projection at index {}", plan.from_index))
+    })?;
+    let to_node_id = compiled.node_id_at(plan.to_index).ok_or_else(|| {
+        compiled_plan_error(format!("missing node projection at index {}", plan.to_index))
+    })?;
+    timeline.record_release(compiled, from_node_id, transfer);
+    timeline.record_arrival(compiled, to_node_id, transfer, step);
 
     transfer_log.push(TransferRecord {
         step,
@@ -1473,6 +1439,7 @@ fn apply_transfer_plan(
         requested_amount: canonicalize_float(plan.requested),
         transferred_amount: canonicalize_float(transfer),
     });
+    Ok(())
 }
 
 fn collect_step_triggers(
@@ -1559,9 +1526,9 @@ fn trigger_mode_for_node(compiled: &CompiledScenario, node_id: &NodeId) -> Trigg
 
 fn gate_behavior_for_node(compiled: &CompiledScenario, node_id: &NodeId) -> GateBehavior {
     match node_kind_for_node(compiled, node_id) {
-        Some(NodeKind::SortingGate) => GateBehavior::Sorting,
-        Some(NodeKind::TriggerGate) => GateBehavior::Trigger,
-        Some(NodeKind::MixedGate) => GateBehavior::Mixed,
+        NodeKind::SortingGate => GateBehavior::Sorting,
+        NodeKind::TriggerGate => GateBehavior::Trigger,
+        NodeKind::MixedGate => GateBehavior::Mixed,
         _ => GateBehavior::None,
     }
 }
@@ -1571,37 +1538,27 @@ fn action_mode_for_node(compiled: &CompiledScenario, node_id: &NodeId) -> Action
     mode.map(|m| m.action_mode.clone()).unwrap_or(ActionMode::PushAny)
 }
 
-fn node_kind_for_node<'a>(
-    compiled: &'a CompiledScenario,
-    node_id: &NodeId,
-) -> Option<&'a NodeKind> {
-    let node = compiled.scenario.nodes.get(node_id)?;
-    Some(&node.kind)
+fn node_kind_for_node<'a>(compiled: &'a CompiledScenario, node_id: &NodeId) -> &'a NodeKind {
+    &compiled.required_node(node_id).kind
 }
 
 fn timeline_node_kind(compiled: &CompiledScenario, node_id: &NodeId) -> Option<TimelineNodeKind> {
     match node_kind_for_node(compiled, node_id) {
-        Some(NodeKind::Delay) => Some(TimelineNodeKind::Delay),
-        Some(NodeKind::Queue) => Some(TimelineNodeKind::Queue),
+        NodeKind::Delay => Some(TimelineNodeKind::Delay),
+        NodeKind::Queue => Some(TimelineNodeKind::Queue),
         _ => None,
     }
 }
 
 fn delay_steps_for_node(compiled: &CompiledScenario, node_id: &NodeId) -> u64 {
-    let Some(node) = compiled.scenario.nodes.get(node_id) else {
-        return 1;
-    };
-    match &node.config {
+    match &compiled.required_node(node_id).config {
         NodeConfig::Delay(config) => config.delay_steps.max(1),
         _ => 1,
     }
 }
 
 fn queue_release_per_step_for_node(compiled: &CompiledScenario, node_id: &NodeId) -> u64 {
-    let Some(node) = compiled.scenario.nodes.get(node_id) else {
-        return 1;
-    };
-    match &node.config {
+    match &compiled.required_node(node_id).config {
         NodeConfig::Queue(config) => config.release_per_step.max(1),
         _ => 1,
     }
@@ -1612,7 +1569,7 @@ fn queue_release_per_step_for_node(compiled: &CompiledScenario, node_id: &NodeId
 /// (validation rejects an over-capacity initial value for each), so both are
 /// enforced at runtime. Other node kinds have no stored-value capacity.
 fn node_capacity_for_node(compiled: &CompiledScenario, node_id: &NodeId) -> Option<u64> {
-    match &compiled.scenario.nodes.get(node_id)?.config {
+    match &compiled.required_node(node_id).config {
         NodeConfig::Pool(config) => config.capacity,
         NodeConfig::Queue(config) => config.capacity,
         _ => None,
@@ -1630,24 +1587,23 @@ fn accepted_arrival(
     state: &EngineState,
     to_index: usize,
     transfer: f64,
-) -> f64 {
-    let Some(node_id) = compiled.node_order.get(to_index) else {
-        return transfer;
-    };
+) -> Result<f64, RunError> {
+    let node_id = compiled.node_id_at(to_index).ok_or_else(|| {
+        compiled_plan_error(format!("missing node projection at index {to_index}"))
+    })?;
     let Some(capacity) = node_capacity_for_node(compiled, node_id) else {
-        return transfer;
+        return Ok(transfer);
     };
-    let held = state.node_values.get(to_index).copied().unwrap_or(0.0).max(0.0);
+    let held = state.node_values[to_index].max(0.0);
     let remaining = canonicalize_float((capacity as f64 - held).max(0.0));
-    canonicalize_float(transfer.min(remaining))
+    Ok(canonicalize_float(transfer.min(remaining)))
 }
 
 fn node_mode_for_node<'a>(
     compiled: &'a CompiledScenario,
     node_id: &NodeId,
 ) -> Option<&'a NodeModeConfig> {
-    let node = compiled.scenario.nodes.get(node_id)?;
-    match &node.config {
+    match &compiled.required_node(node_id).config {
         NodeConfig::Pool(config) => Some(&config.mode),
         NodeConfig::Drain(config) => Some(&config.mode),
         NodeConfig::SortingGate(config) => Some(&config.mode),
@@ -1679,12 +1635,9 @@ fn apply_state_connections(
 ) -> Result<(), RunError> {
     let mut next_step_node_deltas = vec![0.0; state.node_values.len()];
 
-    for edge_id in &compiled.edge_order {
-        let edge = compiled
-            .scenario
-            .edges
-            .get(edge_id)
-            .expect("compiled.edge_order must reference known edges");
+    for compiled_edge in compiled.edges() {
+        let edge_id = compiled_edge.id();
+        let edge = compiled_edge.spec();
         if !edge.enabled || !matches!(edge.connection.kind, ConnectionKind::State) {
             continue;
         }
@@ -1696,18 +1649,14 @@ fn apply_state_connections(
             continue;
         }
 
-        let Some(&from_index) = compiled.node_index_by_id.get(&edge.from) else {
-            continue;
-        };
-        let Some(&to_index) = compiled.node_index_by_id.get(&edge.to) else {
-            continue;
-        };
+        let from_index = compiled_edge.source_index();
+        let to_index = compiled_edge.target_index();
 
-        let source_state = state.node_values.get(from_index).copied().unwrap_or(0.0);
+        let source_state = state.node_values[from_index];
         if !source_state.is_finite() || source_state == 0.0 {
             continue;
         }
-        let target_state = state.node_values.get(to_index).copied().unwrap_or(0.0);
+        let target_state = state.node_values[to_index];
 
         let Some(delta) = evaluate_state_formula_delta(
             compiled,
@@ -1728,18 +1677,16 @@ fn apply_state_connections(
             continue;
         }
 
-        if let Some(slot) = next_step_node_deltas.get_mut(to_index) {
-            *slot = canonicalize_float(*slot + effect);
-        }
+        let slot = &mut next_step_node_deltas[to_index];
+        *slot = canonicalize_float(*slot + effect);
     }
 
     for (index, delta) in next_step_node_deltas.into_iter().enumerate() {
         if delta == 0.0 {
             continue;
         }
-        if let Some(value) = state.node_values.get_mut(index) {
-            *value = canonicalize_float(*value + delta);
-        }
+        let value = &mut state.node_values[index];
+        *value = canonicalize_float(*value + delta);
     }
 
     Ok(())
@@ -1748,12 +1695,13 @@ fn apply_state_connections(
 fn transfer_request(
     compiled: &CompiledScenario,
     state: &EngineState,
-    edge: &crate::types::EdgeSpec,
+    compiled_edge: &CompiledEdge,
     from_value: f64,
     runtime: &ExprRuntime,
     expression_cache: &EngineExpressionCache,
     runtime_variables: &BTreeMap<String, f64>,
 ) -> Result<f64, RunError> {
+    let edge = compiled_edge.spec();
     let requested = match &edge.transfer {
         TransferSpec::Fixed { amount } => *amount,
         TransferSpec::Fraction { numerator, denominator } => {
@@ -1768,31 +1716,29 @@ fn transfer_request(
             metric_value(compiled, state, metric) * *factor
         }
         TransferSpec::Expression { .. } => {
-            let Some(compiled_expression) = expression_cache.transfer_expression(&edge.id) else {
+            let Some(compiled_expression) =
+                expression_cache.transfer_expression(compiled_edge.id())
+            else {
                 return Err(RunError::InvalidRunConfig {
-                    name: format!("edges.{}.transfer.expression.formula", edge.id),
+                    name: format!("edges.{}.transfer.expression.formula", compiled_edge.id()),
                     reason: "expression was not compiled".to_string(),
                 });
             };
 
             let step = state.step as f64;
             let total = total_node_value(state);
-            let to_value = compiled
-                .node_index_by_id
-                .get(&edge.to)
-                .and_then(|to_index| state.node_values.get(*to_index))
-                .copied()
-                .map(canonicalize_float);
+            let to_value =
+                Some(canonicalize_float(state.node_values[compiled_edge.target_index()]));
 
             evaluate_compiled_formula(
                 runtime,
                 compiled_expression,
                 runtime_variables,
-                format!("edges.{}.transfer.expression.formula", edge.id),
+                format!("edges.{}.transfer.expression.formula", compiled_edge.id()),
                 &FormulaBindings {
                     step: canonicalize_float(step),
                     total: canonicalize_float(total),
-                    nodes: canonicalize_float(compiled.node_order.len() as f64),
+                    nodes: canonicalize_float(compiled.node_count() as f64),
                     next_step: canonicalize_float(step + 1.0),
                     is_positive_total: canonicalize_float(total.max(0.0)),
                     from: Some(canonicalize_float(from_value)),
@@ -1916,7 +1862,7 @@ fn evaluate_state_formula_delta(
         &FormulaBindings {
             step: canonicalize_float(step),
             total: canonicalize_float(total),
-            nodes: canonicalize_float(compiled.node_order.len() as f64),
+            nodes: canonicalize_float(compiled.node_count() as f64),
             next_step: canonicalize_float(step + 1.0),
             is_positive_total: canonicalize_float(total.max(0.0)),
             from: None,
@@ -1937,9 +1883,9 @@ fn refresh_metrics(compiled: &CompiledScenario, state: &mut EngineState) {
 
     let total_value = total_node_value(state);
 
-    for metric in &compiled.scenario.tracked_metrics {
+    for metric in compiled.tracked_metrics() {
         let value = match metric_node_index(compiled, metric) {
-            Some(index) => state.node_values.get(index).copied().unwrap_or(0.0),
+            Some(index) => state.node_values[index],
             None => total_value,
         };
         state.metrics.insert(metric.clone(), canonicalize_float(value));
@@ -1951,14 +1897,11 @@ fn total_node_value(state: &EngineState) -> f64 {
 }
 
 fn metric_node_index(compiled: &CompiledScenario, metric: &MetricKey) -> Option<usize> {
-    compiled.metric_index_by_name.get(metric.as_str()).copied()
+    compiled.metric_node_index(metric)
 }
 
 fn node_value(compiled: &CompiledScenario, state: &EngineState, node_id: &NodeId) -> f64 {
-    let Some(index) = compiled.node_index_by_id.get(node_id).copied() else {
-        return 0.0;
-    };
-    state.node_values.get(index).copied().unwrap_or(0.0)
+    state.node_values[compiled.required_node_index(node_id)]
 }
 
 /// Resolves a metric for edge evaluation using live node values, not the end-of-step cache.
@@ -1968,10 +1911,10 @@ fn node_value(compiled: &CompiledScenario, state: &EngineState, node_id: &NodeId
 /// depend on earlier edges in the same step.
 fn metric_value(compiled: &CompiledScenario, state: &EngineState, metric: &MetricKey) -> f64 {
     if let Some(index) = metric_node_index(compiled, metric) {
-        return canonicalize_float(state.node_values.get(index).copied().unwrap_or(0.0));
+        return canonicalize_float(state.node_values[index]);
     }
 
-    if compiled.scenario.tracked_metrics.contains(metric) {
+    if compiled.tracked_metrics().contains(metric) {
         return canonicalize_float(total_node_value(state));
     }
 
@@ -1983,11 +1926,7 @@ fn metric_value(compiled: &CompiledScenario, state: &EngineState, metric: &Metri
 }
 
 fn end_conditions_met(compiled: &CompiledScenario, state: &EngineState) -> bool {
-    compiled
-        .scenario
-        .end_conditions
-        .iter()
-        .any(|condition| end_condition_met(compiled, state, condition))
+    compiled.end_conditions().iter().any(|condition| end_condition_met(compiled, state, condition))
 }
 
 fn end_condition_met(
@@ -2037,9 +1976,9 @@ fn capture_step(
 
     let capture_all_nodes = config.capture.capture_nodes.is_empty();
     let mut snapshot = NodeSnapshot::new(state.step);
-    for (index, node_id) in compiled.node_order.iter().enumerate() {
+    for (index, node_id) in compiled.node_ids().iter().enumerate() {
         if capture_all_nodes || config.capture.capture_nodes.contains(node_id) {
-            let value = state.node_values.get(index).copied().unwrap_or(0.0);
+            let value = state.node_values[index];
             snapshot.values.insert(node_id.clone(), canonicalize_float(value));
         }
     }
@@ -2088,7 +2027,7 @@ fn validate_capture_selection(
     config: &RunConfig,
 ) -> Result<(), RunError> {
     for node_id in &config.capture.capture_nodes {
-        if !compiled.node_index_by_id.contains_key(node_id) {
+        if compiled.node_index(node_id).is_none() {
             return Err(RunError::InvalidRunConfig {
                 name: format!("run.capture.capture_nodes.{node_id}"),
                 reason: "references an unknown node".to_string(),
@@ -2098,7 +2037,7 @@ fn validate_capture_selection(
 
     for metric in &config.capture.capture_metrics {
         let resolves = metric_node_index(compiled, metric).is_some()
-            || compiled.scenario.tracked_metrics.contains(metric);
+            || compiled.tracked_metrics().contains(metric);
         if !resolves {
             return Err(RunError::InvalidRunConfig {
                 name: format!("run.capture.capture_metrics.{metric}"),

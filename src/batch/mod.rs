@@ -14,7 +14,7 @@ use crate::types::{
     BatchConfig, BatchReport, BatchRunSummary, ExecutionMode, RunConfig, RunReport, SeriesPoint,
     SeriesTable,
 };
-use crate::validation::CompiledScenario;
+use crate::CompiledScenario;
 
 #[derive(Debug)]
 struct IndexedRunReport {
@@ -47,7 +47,7 @@ pub fn run_batch(
         .collect::<Vec<_>>();
 
     Ok(BatchReport {
-        scenario_id: compiled.scenario.id.clone(),
+        scenario_id: compiled.scenario_id().clone(),
         requested_runs: config.runs,
         completed_runs: runs.len() as u64,
         execution_mode,

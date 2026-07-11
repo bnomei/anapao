@@ -24,7 +24,7 @@ use anapao::types::{
     StateConnectionConfig, StateConnectionRole, StateConnectionTarget, TransferSpec, TriggerMode,
     VariableRuntimeConfig, VariableSourceSpec, VariableUpdateTiming,
 };
-use anapao::validation::CompiledScenario;
+use anapao::CompiledScenario;
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion, Throughput};
 
 mod profiler;
@@ -62,13 +62,13 @@ impl Drop for BenchTempDir {
 
 fn checksum_compiled(compiled: &CompiledScenario) -> u64 {
     let mut acc = 0u64;
-    acc = acc.wrapping_mul(131).wrapping_add(compiled.node_order.len() as u64);
-    acc = acc.wrapping_mul(131).wrapping_add(compiled.edge_order.len() as u64);
+    acc = acc.wrapping_mul(131).wrapping_add(compiled.node_count() as u64);
+    acc = acc.wrapping_mul(131).wrapping_add(compiled.edge_count() as u64);
 
-    for node_id in &compiled.node_order {
+    for node_id in compiled.node_ids() {
         acc = acc.wrapping_mul(131).wrapping_add(node_id.as_str().len() as u64);
     }
-    for edge_id in &compiled.edge_order {
+    for edge_id in compiled.edge_ids() {
         acc = acc.wrapping_mul(131).wrapping_add(edge_id.as_str().len() as u64);
     }
 

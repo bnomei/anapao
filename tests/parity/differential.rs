@@ -14,7 +14,7 @@ use anapao::types::{
     StateConnectionTarget, TransferSpec, VariableRuntimeConfig, VariableSourceSpec,
     VariableUpdateTiming,
 };
-use anapao::validation::{compile_scenario, CompiledScenario};
+use anapao::{CompiledScenario, Simulator};
 
 const PARITY_VALUE_SCALE: f64 = 1_000_000.0;
 
@@ -571,7 +571,7 @@ fn check_prb011(case: &ParityFixtureCase) {
 
     let compiled = compile_ok(case, &scenario, "state default formula scenario should compile");
     let observed = compiled
-        .scenario
+        .source_spec()
         .edges
         .get(&edge_id)
         .map(|edge| edge.connection.state.formula.clone())
@@ -857,7 +857,7 @@ fn run_config(seed: u64, max_steps: u64) -> RunConfig {
 }
 
 fn compile_ok(case: &ParityFixtureCase, scenario: &ScenarioSpec, detail: &str) -> CompiledScenario {
-    compile_scenario(scenario).unwrap_or_else(|error| {
+    Simulator::compile(scenario.clone()).unwrap_or_else(|error| {
         fail(
             case,
             detail,
@@ -874,7 +874,7 @@ fn compile_invalid_parameter(
     scenario: &ScenarioSpec,
     detail: &str,
 ) -> SetupError {
-    match compile_scenario(scenario) {
+    match Simulator::compile(scenario.clone()) {
         Ok(_) => fail(
             case,
             detail,
@@ -898,7 +898,7 @@ fn run_ok(
             case,
             detail,
             evidence(vec![
-                ("scenario_id", compiled.scenario.id.as_str().to_string()),
+                ("scenario_id", compiled.scenario_id().as_str().to_string()),
                 ("seed", config.seed.to_string()),
                 ("max_steps", config.max_steps.to_string()),
                 ("run_error", error.to_string()),
@@ -918,7 +918,7 @@ fn run_error(
             case,
             detail,
             evidence(vec![
-                ("scenario_id", compiled.scenario.id.as_str().to_string()),
+                ("scenario_id", compiled.scenario_id().as_str().to_string()),
                 ("seed", config.seed.to_string()),
                 ("steps_executed", report.steps_executed.to_string()),
                 ("result", "run unexpectedly succeeded".to_string()),

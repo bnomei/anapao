@@ -10,7 +10,7 @@ use crate::types::{
     EdgeId, EdgeSpec, EndConditionSpec, MetricKey, NodeId, NodeKind, NodeSpec, ScenarioId,
     ScenarioSpec, TransferSpec, VariableSourceSpec,
 };
-use crate::validation::{compile_scenario, CompiledScenario};
+use crate::{CompiledScenario, Simulator};
 
 const SCALE: f64 = 1_000_000.0;
 
@@ -127,7 +127,7 @@ pub fn pikmin_scenario_for_profile(
 pub fn compiled_pikmin_scenario_for_profile(
     profile: PikminFixtureProfile,
 ) -> Result<CompiledScenario, SetupError> {
-    compile_scenario(&pikmin_scenario_for_profile(profile)?)
+    Simulator::compile(pikmin_scenario_for_profile(profile)?)
 }
 
 /// Builds a Pikmin scenario for custom tuning.
@@ -374,7 +374,7 @@ mod tests {
     fn balanced_profile_compiles_with_canonical_tracked_metrics() {
         let compiled = compiled_pikmin_scenario_for_profile(PikminFixtureProfile::Balanced)
             .expect("balanced profile should compile");
-        let tracked = &compiled.scenario.tracked_metrics;
+        let tracked = &compiled.source_spec().tracked_metrics;
 
         assert!(tracked.contains(&days_spent_metric_key()));
         assert!(tracked.contains(&pikmin_metric_key()));

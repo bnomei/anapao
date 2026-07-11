@@ -104,7 +104,7 @@ fn reports_satisfy_basic_run_and_batch_invariants(
         .flat_map(|run| run.final_metrics.values())
         .all(|value| value.is_finite()));
 
-    for tracked_metric in &compiled_scenario.scenario.tracked_metrics {
+    for tracked_metric in &compiled_scenario.source_spec().tracked_metrics {
         assert!(batch_report.aggregate_series.contains_key(tracked_metric));
         assert!(batch_report.runs.iter().all(|run| run.final_metrics.contains_key(tracked_metric)));
     }

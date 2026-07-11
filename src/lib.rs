@@ -129,6 +129,7 @@ pub mod engine;
 pub mod error;
 pub mod events;
 pub mod expr;
+mod plan;
 pub mod prelude;
 pub mod rng;
 pub mod simulator;
@@ -143,6 +144,7 @@ pub mod analysis;
 
 pub use assertions::{AssertionReport, Expectation, MetricSelector};
 pub use events::{EventSink, VecEventSink};
+pub use plan::CompiledScenario;
 pub use simulator::Simulator;
 pub use types::{
     BatchConfig, BatchReport, BatchRunTemplate, CaptureConfig, EndConditionSpec, ExecutionMode,

@@ -15,7 +15,7 @@ use crate::events::{
 };
 use crate::types::{BatchConfig, RunConfig, ScenarioSpec};
 use crate::validation;
-use crate::validation::CompiledScenario;
+use crate::CompiledScenario;
 
 /// Stable façade for compile → run/batch → assert workflows.
 ///
@@ -31,7 +31,7 @@ impl Simulator {
     /// Returns [`SetupError`] for missing graph references, cycles, invalid
     /// transfers, node configs, or variable sources.
     pub fn compile(spec: ScenarioSpec) -> Result<CompiledScenario, SetupError> {
-        validation::compile_scenario(&spec)
+        spec.try_into()
     }
 
     /// Runs one seeded simulation and returns a [`crate::types::RunReport`].

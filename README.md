@@ -76,7 +76,7 @@ let scenario = ScenarioSpec::source_sink(TransferSpec::Fixed { amount: 1.0 })
     .with_end_condition(EndConditionSpec::MaxSteps { steps: 3 });
 
 let compiled = Simulator::compile(scenario).unwrap();
-assert_eq!(compiled.scenario.id.as_str(), "scenario-source-sink");
+assert_eq!(compiled.scenario_id().as_str(), "scenario-source-sink");
 ```
 
 What you learned:
