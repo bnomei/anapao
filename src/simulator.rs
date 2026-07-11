@@ -801,7 +801,7 @@ mod tests {
         }
     }
 
-    fn immediate_completion_compiled_scenario() -> crate::validation::CompiledScenario {
+    fn immediate_completion_compiled_scenario() -> crate::CompiledScenario {
         let mut scenario = fixture_scenario();
         scenario.end_conditions = vec![EndConditionSpec::NodeAtLeast {
             node_id: NodeId::fixture("sink"),

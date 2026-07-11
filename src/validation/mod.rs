@@ -1,6 +1,6 @@
 //! Scenario compile pipeline and run/batch config validation gates.
 //!
-//! [`compile_scenario`] rejects broken graphs (missing endpoints, resource cycles,
+//! The crate-private compiler rejects broken graphs (missing endpoints, resource cycles,
 //! invalid node configs, bad variable sources) and returns a
 //! [`CompiledScenario`] with stable BTreeMap-derived iteration indexes. Run and
 //! batch configs are checked separately so execution never starts with zero step
@@ -11,8 +11,8 @@ use std::collections::BTreeMap;
 use crate::error::SetupError;
 use crate::expr::ExprRuntime;
 use crate::plan::{
-    CompiledEdge, CompiledExpressions, CompiledNode, EdgeIndex, ExpressionSlots, MetricPlan,
-    NodeIndex, PlanIndexes, PlanProjections, RoutingPlan,
+    CompiledEdge, CompiledExpressions, CompiledNode, CompiledScenario, EdgeIndex, ExpressionSlots,
+    MetricPlan, NodeIndex, PlanIndexes, PlanProjections, RoutingPlan,
 };
 use crate::types::{
     BatchConfig, BatchRunTemplate, ConnectionKind, DelayNodeConfig, EdgeId, EdgeSpec,
@@ -26,7 +26,8 @@ use crate::types::{
 /// # Errors
 /// Returns [`SetupError`] for missing graph references, resource cycles, invalid
 /// parameters, or end-condition/metric reference failures.
-pub fn compile_scenario(spec: &ScenarioSpec) -> Result<CompiledScenario, SetupError> {
+#[cfg(test)]
+pub(crate) fn compile_scenario(spec: &ScenarioSpec) -> Result<CompiledScenario, SetupError> {
     compile_scenario_owned(spec.clone())
 }
 
@@ -111,15 +112,13 @@ impl TryFrom<ScenarioSpec> for CompiledScenario {
     }
 }
 
-pub use crate::plan::CompiledScenario;
-
 /// Rejects zero `max_steps` or zero capture strides on a [`RunConfig`].
-pub fn validate_run_config(config: &RunConfig) -> Result<(), SetupError> {
+pub(crate) fn validate_run_config(config: &RunConfig) -> Result<(), SetupError> {
     validate_run_config_with_prefix(config, "run")
 }
 
 /// Rejects zero batch runs and invalid nested run-template limits.
-pub fn validate_batch_config(config: &BatchConfig) -> Result<(), SetupError> {
+pub(crate) fn validate_batch_config(config: &BatchConfig) -> Result<(), SetupError> {
     if config.runs == 0 {
         return Err(SetupError::InvalidParameter {
             name: "batch.runs".to_string(),

@@ -1,5 +1,3 @@
-use anapao::batch::run_batch;
-use anapao::engine::run_single;
 use anapao::rng::derive_run_seed;
 use anapao::testkit::{
     batch_config_fixture as testkit_batch_config_fixture,
@@ -7,7 +5,7 @@ use anapao::testkit::{
     run_config_fixture as testkit_run_config_fixture, scenario_fixture as testkit_scenario_fixture,
 };
 use anapao::types::{BatchConfig, RunConfig, ScenarioSpec};
-use anapao::validation::CompiledScenario;
+use anapao::{CompiledScenario, Simulator};
 use rstest::{fixture, rstest};
 
 #[path = "parity/differential.rs"]
@@ -48,8 +46,8 @@ fn deterministic_single_run(
     compiled_scenario: CompiledScenario,
     run_config: RunConfig,
 ) {
-    let report_a = run_single(&compiled_scenario, &run_config).expect("run should succeed");
-    let report_b = run_single(&compiled_scenario, &run_config).expect("run should succeed");
+    let report_a = Simulator::run(&compiled_scenario, &run_config).expect("run should succeed");
+    let report_b = Simulator::run(&compiled_scenario, &run_config).expect("run should succeed");
 
     assert_eq!(report_a, report_b);
     assert_eq!(report_a.scenario_id, scenario.id);
@@ -60,8 +58,10 @@ fn deterministic_single_run(
 
 #[rstest]
 fn deterministic_batch_run(compiled_scenario: CompiledScenario, batch_config: BatchConfig) {
-    let report_a = run_batch(&compiled_scenario, &batch_config).expect("batch run should succeed");
-    let report_b = run_batch(&compiled_scenario, &batch_config).expect("batch run should succeed");
+    let report_a =
+        Simulator::run_batch(&compiled_scenario, &batch_config).expect("batch run should succeed");
+    let report_b =
+        Simulator::run_batch(&compiled_scenario, &batch_config).expect("batch run should succeed");
 
     assert_eq!(report_a, report_b);
     assert_eq!(report_a.requested_runs, batch_config.runs);
@@ -81,7 +81,7 @@ fn reports_satisfy_basic_run_and_batch_invariants(
     run_config: RunConfig,
     batch_config: BatchConfig,
 ) {
-    let run_report = run_single(&compiled_scenario, &run_config).expect("run should succeed");
+    let run_report = Simulator::run(&compiled_scenario, &run_config).expect("run should succeed");
     assert!(run_report.steps_executed <= run_config.max_steps);
     assert!(!run_report.node_snapshots.is_empty());
     assert_eq!(run_report.node_snapshots.first().map(|snapshot| snapshot.step), Some(0));
@@ -89,7 +89,7 @@ fn reports_satisfy_basic_run_and_batch_invariants(
     assert!(run_report.final_node_values.values().all(|value| value.is_finite() && *value >= 0.0));
 
     let batch_report =
-        run_batch(&compiled_scenario, &batch_config).expect("batch run should succeed");
+        Simulator::run_batch(&compiled_scenario, &batch_config).expect("batch run should succeed");
     let expected_indices = (0_u64..batch_config.runs).collect::<Vec<_>>();
     let actual_indices = batch_report.runs.iter().map(|run| run.run_index).collect::<Vec<_>>();
 

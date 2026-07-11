@@ -1,7 +1,5 @@
 use std::collections::{BTreeMap, HashSet};
 
-use anapao::batch::run_batch;
-use anapao::engine::run_single;
 use anapao::rng::derive_run_seed;
 use anapao::types::{
     ActionMode, BatchConfig, BatchRunTemplate, CaptureConfig, DelayNodeConfig, EdgeId, EdgeSpec,
@@ -9,7 +7,7 @@ use anapao::types::{
     NodeSpec, QueueNodeConfig, RunConfig, ScenarioId, ScenarioSpec, TransferSpec, TriggerMode,
     VariableRuntimeConfig, VariableSourceSpec, VariableUpdateTiming,
 };
-use anapao::validation::{compile_scenario, CompiledScenario};
+use anapao::{CompiledScenario, Simulator};
 
 fn automatic_push_any_mode() -> NodeModeConfig {
     NodeModeConfig { trigger_mode: TriggerMode::Automatic, action_mode: ActionMode::PushAny }
@@ -102,7 +100,7 @@ fn expanded_semantics_scenario() -> ScenarioSpec {
 }
 
 fn compiled_expanded_semantics() -> CompiledScenario {
-    compile_scenario(&expanded_semantics_scenario())
+    Simulator::compile(expanded_semantics_scenario())
         .expect("expanded semantics scenario should compile")
 }
 
@@ -148,10 +146,10 @@ fn perf_determinism_single_replay_expanded_semantics_stress() {
     let compiled = compiled_expanded_semantics();
     let config =
         RunConfig { seed: 0x000A_11CE_55ED_u64, max_steps: 64, capture: CaptureConfig::default() };
-    let baseline = run_single(&compiled, &config).expect("run should succeed");
+    let baseline = Simulator::run(&compiled, &config).expect("run should succeed");
 
     for replay in 0..32 {
-        let replayed = run_single(&compiled, &config).expect("replay run should succeed");
+        let replayed = Simulator::run(&compiled, &config).expect("replay run should succeed");
         assert_eq!(
             replayed, baseline,
             "single-run replay diverged at iteration {replay}; seed={}",
@@ -181,8 +179,8 @@ fn perf_determinism_single_seed_variation_changes_randomized_trace() {
     let config_a = RunConfig { seed: 101, max_steps: 64, capture: CaptureConfig::default() };
     let config_b = RunConfig { seed: 202, max_steps: 64, capture: CaptureConfig::default() };
 
-    let report_a = run_single(&compiled, &config_a).expect("run A should succeed");
-    let report_b = run_single(&compiled, &config_b).expect("run B should succeed");
+    let report_a = Simulator::run(&compiled, &config_a).expect("run A should succeed");
+    let report_b = Simulator::run(&compiled, &config_b).expect("run B should succeed");
 
     assert_ne!(report_a, report_b, "different seeds should produce different random traces");
     assert_ne!(
@@ -195,13 +193,15 @@ fn perf_determinism_single_seed_variation_changes_randomized_trace() {
 #[test]
 fn perf_determinism_generated_valid_scenarios_replay_by_seed_property() {
     for case_index in 0_u64..12 {
-        let compiled = compile_scenario(&generated_determinism_property_scenario(case_index))
+        let compiled = Simulator::compile(generated_determinism_property_scenario(case_index))
             .expect("generated scenario should compile");
         let seeds = [0_u64, 1_u64, 17_u64, 97_u64, 313_u64, case_index + 1_000_u64];
         for seed in seeds {
             let config = RunConfig { seed, max_steps: 64, capture: CaptureConfig::default() };
-            let run_a = run_single(&compiled, &config).expect("first replay run should succeed");
-            let run_b = run_single(&compiled, &config).expect("second replay run should succeed");
+            let run_a =
+                Simulator::run(&compiled, &config).expect("first replay run should succeed");
+            let run_b =
+                Simulator::run(&compiled, &config).expect("second replay run should succeed");
             assert_eq!(
                 run_a, run_b,
                 "deterministic replay diverged for generated case {case_index} at seed {seed}"
@@ -212,17 +212,17 @@ fn perf_determinism_generated_valid_scenarios_replay_by_seed_property() {
 
 #[test]
 fn perf_determinism_expression_cache_reuse_tracks_variable_context_changes() {
-    let compiled = compile_scenario(&generated_determinism_property_scenario(77))
+    let compiled = Simulator::compile(generated_determinism_property_scenario(77))
         .expect("generated scenario should compile");
     let baseline_seed = 101_u64;
     let config_for_seed =
         |seed| RunConfig { seed, max_steps: 64, capture: CaptureConfig::default() };
-    let baseline = run_single(&compiled, &config_for_seed(baseline_seed))
+    let baseline = Simulator::run(&compiled, &config_for_seed(baseline_seed))
         .expect("baseline run should succeed");
 
     let (alternate_seed, alternate_report) = ((baseline_seed + 1)..(baseline_seed + 2_048))
         .map(|seed| {
-            let report = run_single(&compiled, &config_for_seed(seed))
+            let report = Simulator::run(&compiled, &config_for_seed(seed))
                 .expect("alternate run should succeed");
             (seed, report)
         })
@@ -238,7 +238,7 @@ fn perf_determinism_expression_cache_reuse_tracks_variable_context_changes() {
         "alternate seed {alternate_seed} should produce a different run context"
     );
 
-    let baseline_replay = run_single(&compiled, &config_for_seed(baseline_seed))
+    let baseline_replay = Simulator::run(&compiled, &config_for_seed(baseline_seed))
         .expect("baseline replay should succeed");
     assert_eq!(
         baseline_replay, baseline,
@@ -256,8 +256,8 @@ fn perf_determinism_batch_replay_stress_guardrails() {
         run_template: BatchRunTemplate { max_steps: 64, capture: CaptureConfig::default() },
     };
 
-    let report_a = run_batch(&compiled, &config).expect("batch run should succeed");
-    let report_b = run_batch(&compiled, &config).expect("batch replay should succeed");
+    let report_a = Simulator::run_batch(&compiled, &config).expect("batch run should succeed");
+    let report_b = Simulator::run_batch(&compiled, &config).expect("batch replay should succeed");
 
     assert_eq!(report_a, report_b, "batch replay must be deterministic");
     assert_eq!(report_a.runs.len() as u64, config.runs);
@@ -307,8 +307,9 @@ fn perf_determinism_batch_parallel_matches_sequential_stress() {
     let parallel = BatchConfig { execution_mode: ExecutionMode::Rayon, ..sequential.clone() };
 
     let report_sequential =
-        run_batch(&compiled, &sequential).expect("sequential batch should succeed");
-    let report_parallel = run_batch(&compiled, &parallel).expect("parallel batch should succeed");
+        Simulator::run_batch(&compiled, &sequential).expect("sequential batch should succeed");
+    let report_parallel =
+        Simulator::run_batch(&compiled, &parallel).expect("parallel batch should succeed");
 
     assert_eq!(report_parallel.execution_mode, ExecutionMode::Rayon);
     assert_eq!(report_parallel.runs, report_sequential.runs);
@@ -326,7 +327,7 @@ fn perf_determinism_batch_parallel_request_falls_back_deterministically() {
         run_template: BatchRunTemplate { max_steps: 64, capture: CaptureConfig::default() },
     };
 
-    let report = run_batch(&compiled, &config).expect("batch run should succeed");
+    let report = Simulator::run_batch(&compiled, &config).expect("batch run should succeed");
     assert_eq!(report.execution_mode, ExecutionMode::SingleThread);
     assert_eq!(report.runs.len() as u64, config.runs);
 }

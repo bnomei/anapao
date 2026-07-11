@@ -10,8 +10,8 @@
 //!
 //! Compile a declarative [`ScenarioSpec`], run seeded single simulations or Monte
 //! Carlo batches, evaluate typed [`Expectation`]s, and persist CI-friendly artifact
-//! packs. Prefer [`Simulator`] as the public entrypoint; lower-level modules own
-//! the engine, events, validation, and writers.
+//! packs. Prefer [`Simulator`] as the public entrypoint; its compiled execution
+//! plan is intentionally opaque.
 //!
 //! ## Concepts
 //! - `ScenarioSpec`: declarative simulation graph (nodes, edges, end conditions, metrics).
@@ -124,8 +124,8 @@
 
 pub mod artifact;
 pub mod assertions;
-pub mod batch;
-pub mod engine;
+mod batch;
+mod engine;
 pub mod error;
 pub mod events;
 pub mod expr;
@@ -137,7 +137,7 @@ pub mod stats;
 pub mod stochastic;
 pub mod testkit;
 pub mod types;
-pub mod validation;
+mod validation;
 
 #[cfg(feature = "analysis-polars")]
 pub mod analysis;

@@ -9,4 +9,4 @@ pub use crate::types::{
     BatchConfig, BatchReport, BatchRunTemplate, CaptureConfig, EndConditionSpec, ExecutionMode,
     MetricKey, RunConfig, RunReport, ScenarioSpec, TransferSpec,
 };
-pub use crate::Simulator;
+pub use crate::{CompiledScenario, Simulator};

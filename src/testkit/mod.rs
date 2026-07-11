@@ -17,7 +17,7 @@ use crate::types::{
     ExecutionMode, MetricKey, NodeId, NodeKind, NodeSpec, RunConfig, ScenarioId, ScenarioSpec,
     TransferSpec,
 };
-use crate::validation::{compile_scenario, CompiledScenario};
+use crate::{CompiledScenario, Simulator};
 
 /// Default seed used by deterministic run fixtures.
 pub const FIXTURE_RUN_SEED: u64 = 42;
@@ -90,7 +90,7 @@ pub fn fixture_scenario() -> ScenarioSpec {
 
 /// Compiles the default fixture scenario into deterministic node/edge indexes.
 pub fn fixture_compiled_scenario() -> Result<CompiledScenario, SetupError> {
-    compile_scenario(&fixture_scenario())
+    Simulator::compile(fixture_scenario())
 }
 
 /// Build a run config fixture with explicit seed/max steps.

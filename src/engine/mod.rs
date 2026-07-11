@@ -34,7 +34,7 @@ const GATE_RNG_SALT: u64 = 0xA11C_E5E0_0023_0002;
 
 #[derive(Debug, Clone, PartialEq)]
 /// Mutable step-local inventory for one run: step counter, node values, metrics.
-pub struct EngineState {
+pub(crate) struct EngineState {
     pub step: u64,
     pub node_values: Vec<f64>,
     pub metrics: BTreeMap<MetricKey, f64>,
@@ -430,7 +430,7 @@ fn sample_variable_source(source: &VariableSourceSpec, rng: &mut BaseRng) -> Opt
 }
 
 /// Builds initial engine state from compiled node defaults and tracked metrics.
-pub fn init_state(compiled: &CompiledScenario) -> EngineState {
+pub(crate) fn init_state(compiled: &CompiledScenario) -> EngineState {
     let node_values = compiled
         .nodes()
         .map(|(_, node)| canonicalize_float(node.initial_value))
@@ -449,7 +449,10 @@ pub fn init_state(compiled: &CompiledScenario) -> EngineState {
 }
 
 /// Advances one run from init to completion without streaming events.
-pub fn run_single(compiled: &CompiledScenario, config: &RunConfig) -> Result<RunReport, RunError> {
+pub(crate) fn run_single(
+    compiled: &CompiledScenario,
+    config: &RunConfig,
+) -> Result<RunReport, RunError> {
     let mut emit = |_event: RunEvent| Ok(());
     run_single_internal(compiled, config, "run-0", false, &mut emit)
 }

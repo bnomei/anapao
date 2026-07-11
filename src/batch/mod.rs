@@ -26,7 +26,7 @@ struct IndexedRunReport {
 ///
 /// `completed_runs` counts produced run summaries, not how many runs set
 /// `completed == true` on their individual reports.
-pub fn run_batch(
+pub(crate) fn run_batch(
     compiled: &CompiledScenario,
     config: &BatchConfig,
 ) -> Result<BatchReport, RunError> {
@@ -302,7 +302,7 @@ mod tests {
         }
     }
 
-    fn compiled_fixture() -> crate::validation::CompiledScenario {
+    fn compiled_fixture() -> crate::CompiledScenario {
         let source = NodeId::fixture("source");
         let sink = NodeId::fixture("sink");
         let sink_metric = MetricKey::fixture("sink");

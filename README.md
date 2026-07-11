@@ -83,6 +83,31 @@ What you learned:
 - compilation is explicit and deterministic,
 - you should compile once and reuse the compiled form for runs.
 
+### 0.2 API Migration
+
+`CompiledScenario` is now an opaque, immutable execution product. Use the root-level
+`Simulator` facade instead of the old raw compiler/engine/batch paths:
+
+```rust
+let scenario = anapao::testkit::fixture_scenario();
+let run_config = anapao::testkit::deterministic_run_config();
+
+// Before: anapao::validation::compile_scenario(&scenario)
+// After:
+let compiled = anapao::Simulator::compile(scenario).unwrap();
+
+// Before: anapao::engine::run_single(&compiled, &run_config)
+// After:
+let report = anapao::Simulator::run(&compiled, &run_config).unwrap();
+
+// Before: compiled.scenario.id / compiled.node_order / compiled.edge_order
+// After:  compiled.scenario_id() / compiled.node_ids() / compiled.edge_ids()
+```
+
+For checked conversion in generic code, use `let compiled: anapao::CompiledScenario =
+scenario.try_into()?;`. Read inspection data through `scenario_id()`, `source_spec()`,
+`node_ids()`, `edge_ids()`, `node_count()`, and `edge_count()`; raw execution modules are private.
+
 ---
 
 ## Step 3: Configure `RunConfig`

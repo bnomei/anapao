@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use anapao::engine::run_single;
 use anapao::error::{RunError, SetupError};
 use anapao::rng::rng_from_seed;
 use anapao::stochastic::sample_closed_interval;
@@ -893,7 +892,7 @@ fn run_ok(
     config: &RunConfig,
     detail: &str,
 ) -> anapao::types::RunReport {
-    run_single(compiled, config).unwrap_or_else(|error| {
+    Simulator::run(compiled, config).unwrap_or_else(|error| {
         fail(
             case,
             detail,
@@ -913,7 +912,7 @@ fn run_error(
     config: &RunConfig,
     detail: &str,
 ) -> RunError {
-    match run_single(compiled, config) {
+    match Simulator::run(compiled, config) {
         Ok(report) => fail(
             case,
             detail,
