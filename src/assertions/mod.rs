@@ -161,6 +161,10 @@ pub fn validate_expectations(expectations: &[Expectation]) -> Result<(), Asserti
 }
 
 /// Evaluates expectations against a single-run report in declaration order.
+///
+/// Final selectors read always-retained terminal metrics. Step and series
+/// expectations require retained capture evidence and report it as missing when
+/// the run used a no-series capture policy.
 pub fn evaluate_run_expectations(
     run_report: &RunReport,
     expectations: &[Expectation],
@@ -177,6 +181,9 @@ pub fn evaluate_run_expectations(
 }
 
 /// Evaluates expectations against batch aggregates and per-run finals.
+///
+/// Final selectors read per-run terminal metrics; step and series expectations
+/// require aggregate sampling evidence.
 pub fn evaluate_batch_expectations(
     batch_report: &BatchReport,
     expectations: &[Expectation],

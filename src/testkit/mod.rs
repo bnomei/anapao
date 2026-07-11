@@ -93,9 +93,9 @@ pub fn fixture_compiled_scenario() -> Result<CompiledScenario, SetupError> {
     Simulator::compile(fixture_scenario())
 }
 
-/// Build a run config fixture with explicit seed/max steps.
+/// Build a run config fixture with explicit seed/max steps and default typed capture.
 pub fn fixture_run_config(seed: u64, max_steps: u64) -> RunConfig {
-    RunConfig { seed, max_steps, capture: CaptureConfig::default() }
+    RunConfig::for_seed(seed).with_max_steps(max_steps).with_capture(CaptureConfig::default())
 }
 
 /// Build a deterministic run config fixture.
@@ -109,15 +109,14 @@ pub fn fixture_batch_config(
     base_seed: u64,
     execution_mode: ExecutionMode,
 ) -> BatchConfig {
-    BatchConfig {
-        runs,
-        base_seed,
-        execution_mode,
-        run_template: BatchRunTemplate {
-            max_steps: FIXTURE_RUN_MAX_STEPS,
-            aggregation: AggregationConfig::default(),
-        },
-    }
+    BatchConfig::for_runs(runs)
+        .with_base_seed(base_seed)
+        .with_execution_mode(execution_mode)
+        .with_run_template(
+            BatchRunTemplate::default()
+                .with_max_steps(FIXTURE_RUN_MAX_STEPS)
+                .with_aggregation(AggregationConfig::default()),
+        )
 }
 
 /// Build a deterministic sequential batch config fixture.

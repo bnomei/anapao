@@ -137,7 +137,25 @@ assert!(matches!(
 
 What you learned:
 - seeds pin determinism,
-- capture configuration controls trace granularity.
+- capture configuration controls diagnostic trace granularity.
+
+### Retention, Events, and Aggregation Are Separate
+
+`CaptureConfig` controls **diagnostic report retention**, not whether the simulation completes.
+`CaptureConfig::none()` leaves `RunReport::final_node_values` and `RunReport::final_metrics`
+available, while intentionally leaving node snapshots, variable snapshots, transfer records, and
+metric series empty. Use `CaptureConfig::final_only()` when final step-aligned diagnostics are
+useful without retaining transfers, or `CaptureSchedule::Every` with typed `Selection` values for
+periodic/selective diagnostics.
+
+Live streamed events are independent of report retention: `Simulator::run_with_sink` and the
+assertion-streaming APIs emit the same ordered simulation events when capture is `none()` as they
+do with default capture. Batch aggregate sampling is separate again: `AggregationConfig` controls
+only the metric series in `BatchReport`, while every `BatchRunSummary` retains terminal metrics.
+
+Consequently, final-value assertions work with no captured series. Step selectors,
+monotonic-series assertions, and series probability assertions require captured or aggregated
+series evidence; when it was not requested, they report missing evidence instead of inferring it.
 
 Batch aggregation is separate from per-run diagnostic capture. Configure only the
 metric schedule and selection that belong in the `BatchReport`:
@@ -214,7 +232,8 @@ assert_eq!(expectations.len(), 3);
 
 What you learned:
 - expectations are data, not ad-hoc assertion code,
-- selector controls whether you validate final value vs specific step.
+- final selectors read always-retained terminal metrics, while specific-step selectors require
+  captured series evidence.
 
 ---
 
@@ -358,6 +377,11 @@ What you learned:
 - persisted artifacts become your CI and debugging contract,
 - manifest keys are stable assertions for artifact expectations.
 
+Artifact file ownership does not change when diagnostics are disabled. Where a run or batch writer
+is invoked, its manifest-owned `variables.csv` and `series.csv` files remain valid header-only CSVs
+when no variable snapshots or series were retained. Supplied events still produce `events.jsonl`
+and drive the history/replay indexes.
+
 ---
 
 ## Step 10: Fixture-First Testing with `testkit` (and `rstest`)
@@ -398,7 +422,8 @@ What you learned:
   - fix: pin `RunConfig.seed` for single runs and keep batch `base_seed` stable (batch seeds derive from `base_seed` + run index).
 - Sparse traces:
   - symptom: insufficient snapshots for diagnostics.
-  - fix: adjust `RunConfig.capture` with `CaptureSchedule::Every`.
+  - fix: use `CaptureConfig::final_only()` or adjust `RunConfig.capture` with
+    `CaptureSchedule::Every`.
 
 ## Feature Flags
 
@@ -417,11 +442,8 @@ individual optional feature (`parallel`, `analysis-polars`, and
 - `types`
 - `error`
 - `rng`
-- `validation`
-- `engine`
 - `stochastic`
 - `events`
-- `batch`
 - `stats`
 - `artifact`
 - `assertions`
@@ -445,17 +467,21 @@ cargo bench --no-run
 ## Performance Workflow (Manual Compare)
 
 ```bash
-# capture baseline matrix
-./scripts/bench-criterion save --bench simulation --baseline hotspots-20260224-default
-./scripts/bench-criterion save --bench simulation --features parallel --baseline hotspots-20260224-parallel
+# capture matching default and parallel Criterion baselines (these runs can take time)
+./scripts/bench-criterion save --bench simulation --baseline capture-retention-default
+./scripts/bench-criterion save --bench simulation --features parallel --baseline capture-retention-parallel
 
 # compare matrix
-./scripts/bench-criterion compare --bench simulation --baseline hotspots-20260224-default
-./scripts/bench-criterion compare --bench simulation --features parallel --baseline hotspots-20260224-parallel
+./scripts/bench-criterion compare --bench simulation --baseline capture-retention-default
+./scripts/bench-criterion compare --bench simulation --features parallel --baseline capture-retention-parallel
 
 # manual non-failing regression summary (+7% threshold)
-./scripts/bench-criterion summary --bench simulation --baseline hotspots-20260224-default --threshold 0.07
-./scripts/bench-criterion summary --bench simulation --features parallel --baseline hotspots-20260224-parallel --threshold 0.07
+./scripts/bench-criterion summary --bench simulation --baseline capture-retention-default --threshold 0.07
+./scripts/bench-criterion summary --bench simulation --features parallel --baseline capture-retention-parallel --threshold 0.07
+
+# run isolated DHAT capture-retention evidence in separate processes
+./scripts/bench-capture-memory save --baseline capture-retention-default
+./scripts/bench-capture-memory compare --baseline capture-retention-default
 
 # flamegraphs and csv summaries
 ./benchmarks/run_profiles.sh
@@ -472,6 +498,19 @@ When updating dependencies:
 2. Review changelogs for public API, MSRV, feature, and license changes before merging.
 3. Keep optional feature dependencies (`parallel`, `analysis-polars`, and `assertions-extended`) checked with the normal CI matrix instead of adding one-off release automation.
 4. Regenerate and commit `Cargo.lock`, then run `cargo audit --deny warnings` plus the standard repository validation commands.
+
+## 0.2 Capture Policy Migration
+
+Rust configuration fields are intentionally no longer a stable struct-literal surface. Construct
+policies with `CaptureConfig::{none, final_only, default}` and consuming builders such as
+`with_schedule`, `with_metrics`, and `with_variables`; configure batch aggregate sampling with
+`AggregationConfig` and `BatchConfig::with_aggregation`. `CaptureConfig::disabled()` and batch
+`with_capture` adapters are deprecated compatibility spellings, not recommended examples.
+
+Persisted JSON remains migration-friendly: anapao reads the historical five-field capture object
+(and historical nested `BatchRunTemplate.capture`) with its old behavior, rejects a zero legacy
+stride, and writes only the canonical tagged typed representation. New JSON should use the current
+`schedule`, channel selections, and batch `aggregation` fields.
 
 ## Local Pre-commit
 

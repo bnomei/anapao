@@ -1,5 +1,8 @@
 use std::collections::BTreeSet;
+use std::fs;
 
+use anapao::artifact::write_run_artifacts;
+use anapao::assertions::{Expectation, MetricSelector};
 use anapao::error::RunError;
 use anapao::events::VecEventSink;
 use anapao::types::{
@@ -37,6 +40,102 @@ fn none_retains_terminal_maps_but_no_diagnostics_or_events_difference() {
     assert_eq!(none_report.final_node_values, default_report.final_node_values);
     assert_eq!(none_report.final_metrics, default_report.final_metrics);
     assert_eq!(none_events.events(), default_events.events());
+}
+
+#[test]
+fn no_capture_assertion_streaming_keeps_events_final_assertions_and_artifacts_usable() {
+    let compiled = compiled_scenario();
+    let default_config = RunConfig::for_seed(8).with_max_steps(4);
+    let none_config = default_config.clone().with_capture(CaptureConfig::none());
+    let final_expectation = [Expectation::Equals {
+        metric: MetricKey::fixture("sink"),
+        selector: MetricSelector::Final,
+        expected: 2.0,
+    }];
+
+    let mut default_events = VecEventSink::new();
+    let (_default_report, default_assertions) = Simulator::run_with_assertions_and_sink(
+        &compiled,
+        &default_config,
+        &final_expectation,
+        &mut default_events,
+    )
+    .expect("default assertion-streaming run succeeds");
+    let mut no_capture_events = VecEventSink::new();
+    let (report, no_capture_assertions) = Simulator::run_with_assertions_and_sink(
+        &compiled,
+        &none_config,
+        &final_expectation,
+        &mut no_capture_events,
+    )
+    .expect("no-capture assertion-streaming run succeeds");
+    assert!(default_assertions.is_success());
+    assert!(no_capture_assertions.is_success());
+    assert_eq!(no_capture_events.events(), default_events.events());
+    assert!(no_capture_events
+        .events()
+        .iter()
+        .any(|event| event.event_name() == "assertion_checkpoint"));
+    assert!(no_capture_events.events().windows(2).all(|pair| pair[0].order() <= pair[1].order()));
+    let checkpoint_index = no_capture_events
+        .events()
+        .iter()
+        .position(|event| event.event_name() == "assertion_checkpoint")
+        .expect("final assertion checkpoint is emitted");
+    let terminal_step_end_index = no_capture_events
+        .events()
+        .iter()
+        .rposition(|event| event.event_name() == "step_end")
+        .expect("terminal step end is emitted");
+    assert!(checkpoint_index < terminal_step_end_index);
+
+    let metric = MetricKey::fixture("sink");
+    let missing_step_expectations = [
+        Expectation::Equals {
+            metric: metric.clone(),
+            selector: MetricSelector::Final,
+            expected: 2.0,
+        },
+        Expectation::Equals { metric, selector: MetricSelector::Step(1), expected: 1.0 },
+    ];
+    let mut missing_step_events = VecEventSink::new();
+    let (_report, assertions) = Simulator::run_with_assertions_and_sink(
+        &compiled,
+        &none_config,
+        &missing_step_expectations,
+        &mut missing_step_events,
+    )
+    .expect("no-capture step assertion-streaming run succeeds");
+    assert_eq!(assertions.passed, 1);
+    assert_eq!(assertions.failed, 1);
+    assert!(assertions.results[1].actual.contains("missing metric `sink` at `run.series.step=1`"));
+    assert_eq!(
+        missing_step_events
+            .events()
+            .iter()
+            .filter(|event| event.event_name() == "assertion_checkpoint")
+            .count(),
+        2
+    );
+    assert!(missing_step_events.events().windows(2).all(|pair| pair[0].order() <= pair[1].order()));
+
+    let output = tempfile::tempdir().expect("temporary artifact directory");
+    let manifest =
+        write_run_artifacts(output.path(), &report, no_capture_events.events()).expect("artifacts");
+    assert!(manifest.artifacts.contains_key("events"));
+    assert!(manifest.artifacts.contains_key("variables"));
+    assert!(manifest.artifacts.contains_key("series"));
+    assert!(!fs::read_to_string(output.path().join("events.jsonl"))
+        .expect("events output")
+        .is_empty());
+    assert_eq!(
+        fs::read_to_string(output.path().join("variables.csv")).expect("variables output"),
+        "variable,step,value\n"
+    );
+    assert_eq!(
+        fs::read_to_string(output.path().join("series.csv")).expect("series output"),
+        "metric,step,value\n"
+    );
 }
 
 #[test]

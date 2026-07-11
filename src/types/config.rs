@@ -98,7 +98,9 @@ impl<T> Selection<T> {
 ///
 /// The fields are deliberately private so a config cannot reintroduce the old
 /// empty-set-means-all or zero-stride sentinels. Use constructors and consuming
-/// builders to make the requested retention policy explicit.
+/// builders to make the requested retention policy explicit. Legacy five-field
+/// JSON remains readable for the 0.2 migration, but serialization always emits
+/// the canonical typed shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaptureConfig {
     schedule: CaptureSchedule,
@@ -237,7 +239,8 @@ fn selection_is_empty<T>(selection: &Selection<T>) -> bool {
 /// Batch aggregation is intentionally narrower than per-run diagnostics: it
 /// controls only the metric series that become observable on a [`BatchReport`].
 /// Node snapshots, variables, and transfer records have never had a batch
-/// report destination and therefore are not configurable here.
+/// report destination and therefore are not configurable here. Per-run terminal
+/// summaries remain available even when this policy is [`AggregationConfig::none`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AggregationConfig {
@@ -431,7 +434,7 @@ impl RunConfig {
         self
     }
 
-    /// Replaces capture settings for the run.
+    /// Replaces retained diagnostic settings for the run.
     #[must_use]
     pub fn with_capture(mut self, capture: CaptureConfig) -> Self {
         self.capture = capture;
@@ -440,6 +443,9 @@ impl RunConfig {
 }
 
 /// Seed-agnostic run template used by batch execution.
+///
+/// `aggregation` retains aggregate metric series only; it is not a per-run
+/// diagnostic capture policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BatchRunTemplate {
     pub max_steps: u64,

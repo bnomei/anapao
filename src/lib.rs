@@ -15,11 +15,18 @@
 //!
 //! ## Concepts
 //! - `ScenarioSpec`: declarative simulation graph (nodes, edges, end conditions, metrics).
-//! - `RunConfig`: deterministic single-run controls (`seed`, `max_steps`, capture options).
-//! - `BatchConfig`: deterministic Monte Carlo controls (`runs`, `base_seed`, execution mode).
+//! - `RunConfig`: deterministic single-run controls (`seed`, `max_steps`, diagnostic capture).
+//! - `BatchConfig`: deterministic Monte Carlo controls (`runs`, `base_seed`, execution mode,
+//!   aggregate metric sampling).
 //! - `BatchRunTemplate`: seed-agnostic per-run defaults used by `BatchConfig`.
 //! - `Expectation`: typed assertions evaluated against run or batch reports.
 //! - Artifacts: manifested CI-friendly outputs (`events.jsonl`, `series.csv`, `summary.csv`, ...).
+//!
+//! Terminal node and metric maps are always retained. [`CaptureConfig`] controls diagnostic
+//! snapshots, transfer records, variable snapshots, and single-run series; [`AggregationConfig`]
+//! controls batch metric series only. Event sinks are live streams and do not depend on either
+//! retention policy. Final assertions therefore work with no series, while step and series
+//! assertions require explicitly retained evidence.
 //!
 //! ## Deterministic Single Run
 //! ```rust

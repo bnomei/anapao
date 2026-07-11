@@ -93,6 +93,9 @@ fn readme_contains_curated_builder_snippet_signatures() {
         "### Snippet S07 — Create BatchConfig",
         "let batch = BatchConfig::for_runs(64)",
         "Batch aggregation is separate from per-run diagnostic capture.",
+        "`CaptureConfig::none()` leaves `RunReport::final_node_values` and `RunReport::final_metrics`",
+        "monotonic-series assertions, and series probability assertions require captured or aggregated",
+        "`CaptureConfig::{none, final_only, default}`",
     ] {
         assert!(readme.contains(needle), "README drift: missing snippet marker `{needle}`");
     }

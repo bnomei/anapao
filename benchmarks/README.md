@@ -40,7 +40,9 @@ CARGO_HOME=/Users/bnomei/Sites/anpao/.cargo-home cargo bench --bench simulation
 
 ## Baseline matrix and manual regression summary
 
-Capture default and parallel baselines:
+Capture matching default and parallel baselines. Criterion runs can take time;
+run each compare against the baseline saved from the same machine/toolchain and
+identical workload:
 
 ```bash
 ./scripts/bench-criterion save --bench simulation --baseline hotspots-20260224-default
@@ -54,7 +56,8 @@ Compare against baselines:
 ./scripts/bench-criterion compare --bench simulation --features parallel --baseline hotspots-20260224-parallel
 ```
 
-Print a non-failing manual regression summary (default +7% threshold):
+Print a non-failing manual regression summary (default +7% threshold). This is
+descriptive only, not a completion gate:
 
 ```bash
 ./scripts/bench-criterion summary --bench simulation --baseline hotspots-20260224-default --threshold 0.07
@@ -76,7 +79,8 @@ Save a named baseline before changing the batch representation:
 ./scripts/bench-capture-memory save --baseline capture-retention-pre
 ```
 
-Compare a later implementation with the same case IDs:
+Compare a later implementation with the same case IDs in isolated DHAT
+processes:
 
 ```bash
 ./scripts/bench-capture-memory compare --baseline capture-retention-pre

@@ -24,10 +24,22 @@ Run this checklist before finalizing any `anapao` test change.
 
 ## Capture Config Implications
 
-- `CaptureConfig::default` records step-zero/final snapshots and can increase assertion surface.
-- `CaptureConfig::disabled` favors throughput but removes some snapshot evidence.
-- `capture.every_n_steps` must remain `> 0`; invalid values should fail setup validation.
-- Do not assert snapshots that are intentionally suppressed by capture settings.
+- `CaptureConfig::default()` records step-zero/final diagnostics and can increase assertion surface.
+- `CaptureConfig::none()` removes retained diagnostic snapshots/series, but terminal node/metric
+  maps and live events remain available.
+- Use `CaptureConfig::final_only()` or `CaptureSchedule::Every` with a positive `NonZeroU64`
+  stride when step evidence is required; do not use deprecated `CaptureConfig::disabled()`.
+- Final assertions remain valid without series. Step, monotonic, and series assertions must report
+  missing evidence when the relevant capture/aggregation policy did not retain it.
+- `AggregationConfig` controls batch aggregate metric series separately from per-run diagnostics.
+- Do not assert snapshots or series that are intentionally suppressed by capture/aggregation.
+
+## Batch Aggregation Ordering
+
+- Normalize independently executed batch samples into complete ascending `run_index` order before
+  constructing summaries or aggregating metric points.
+- Fold floating-point aggregate sums sequentially in that run-index order. Do not perform a
+  parallel `f64` reduction, even when execution uses Rayon.
 
 ## Common Flake Causes and Fixes
 

@@ -80,7 +80,11 @@ impl SeriesTable {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-/// Full outcome of one seeded run: steps, snapshots, transfers, series, and finals.
+/// Full outcome of one seeded run: terminal results plus retained diagnostics.
+///
+/// `final_node_values` and `final_metrics` are mandatory terminal results. The
+/// snapshot, transfer, variable, and series collections are diagnostics and may
+/// be empty under [`super::CaptureConfig::none`].
 pub struct RunReport {
     pub scenario_id: ScenarioId,
     pub seed: u64,
@@ -137,7 +141,10 @@ pub struct TransferRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-/// Monte Carlo batch outcome: per-run summaries and step-aligned aggregate series.
+/// Monte Carlo batch outcome: terminal per-run summaries and retained aggregate series.
+///
+/// Each run summary retains terminal metrics independently of `aggregate_series`.
+/// The aggregate map may be empty under [`super::AggregationConfig::none`].
 pub struct BatchReport {
     pub scenario_id: ScenarioId,
     /// Requested run count from [`super::BatchConfig::runs`].

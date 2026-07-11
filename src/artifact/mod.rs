@@ -56,6 +56,8 @@ const CONTENT_TYPE_CSV: &str = "text/csv";
 /// # Side effects
 /// Creates `output_dir` if needed, deletes known prior artifact basenames there,
 /// and writes events, variables, history, replay, series, and manifest files.
+/// Empty retained variables or series still produce valid header-only CSV files;
+/// supplied events remain persisted and drive the history/replay indexes.
 pub fn write_run_artifacts(
     output_dir: impl AsRef<Path>,
     run_report: &RunReport,
@@ -67,7 +69,9 @@ pub fn write_run_artifacts(
 /// Persist a run artifact pack and return its manifest.
 ///
 /// Output includes deterministic JSON/CSV files and a typed `manifest.json`
-/// entrypoint. When `assertion_report` is provided, `assertions.json` is also written.
+/// entrypoint. Empty diagnostic collections are represented by header-only CSVs,
+/// not omitted artifact files. When `assertion_report` is provided,
+/// `assertions.json` is also written.
 ///
 /// # Full playbook (setup -> run -> assert -> artifacts)
 /// ```no_run
