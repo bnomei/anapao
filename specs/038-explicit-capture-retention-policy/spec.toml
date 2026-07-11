@@ -34,6 +34,6 @@ global_scope = [
 spec_kind = "migration"
 execution_policy = "auto-continue"
 fanout_policy = "serial"
-human_checkpoint = "before-implementation"
+human_checkpoint = "none"
 commit_policy = "after-validation"
 review_policy = "required"
