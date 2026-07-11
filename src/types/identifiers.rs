@@ -6,7 +6,7 @@
 
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -20,10 +20,20 @@ pub enum IdentifierError {
 
 macro_rules! define_identifier {
     ($name:ident, $kind:literal) => {
-        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
         #[serde(transparent)]
         #[doc = concat!("Validated ", $kind, " wrapper used in persisted/session-facing APIs.")]
         pub struct $name(String);
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                String::deserialize(deserializer)
+                    .and_then(|value| Self::try_from(value).map_err(serde::de::Error::custom))
+            }
+        }
 
         impl $name {
             #[doc = concat!("Creates a validated ", $kind, ".")]

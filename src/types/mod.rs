@@ -33,6 +33,49 @@ mod tests {
     }
 
     #[test]
+    fn identifier_deserialization_uses_checked_construction() {
+        macro_rules! assert_identifier_serde_contract {
+            ($identifier:ty, $value:literal) => {{
+                let decoded: $identifier = serde_json::from_str(concat!("\"", $value, "\""))
+                    .expect("valid identifier should deserialize");
+                assert_eq!(decoded.as_str(), $value);
+                assert_eq!(
+                    serde_json::to_string(&decoded).expect("identifier should serialize"),
+                    concat!("\"", $value, "\"")
+                );
+
+                let whitespace = serde_json::from_str::<$identifier>(r#""   ""#)
+                    .expect_err("whitespace-only identifier should be rejected");
+                assert!(whitespace.to_string().contains("cannot be empty"));
+
+                let control = serde_json::from_str::<$identifier>(r#""bad\nid""#)
+                    .expect_err("control-character identifier should be rejected");
+                assert!(control.to_string().contains("cannot contain control characters"));
+            }};
+        }
+
+        assert_identifier_serde_contract!(ScenarioId, "scenario-valid");
+        assert_identifier_serde_contract!(NodeId, "node-valid");
+        assert_identifier_serde_contract!(EdgeId, "edge-valid");
+        assert_identifier_serde_contract!(MetricKey, "metric-valid");
+    }
+
+    #[test]
+    fn scenario_spec_round_trips_identifier_map_keys_and_values() {
+        let scenario = ScenarioSpec::source_sink(TransferSpec::Fixed { amount: 1.0 });
+
+        let encoded = serde_json::to_string(&scenario).expect("scenario should serialize");
+        let wire: serde_json::Value = serde_json::from_str(&encoded).expect("valid scenario JSON");
+        assert!(wire["nodes"].get("source").is_some());
+        assert!(wire["nodes"].get("sink").is_some());
+        assert!(wire["edges"].get("edge-source-sink").is_some());
+
+        let decoded: ScenarioSpec =
+            serde_json::from_str(&encoded).expect("scenario should deserialize unchanged");
+        assert_eq!(decoded, scenario);
+    }
+
+    #[test]
     fn node_kind_supports_new_and_legacy_families() {
         assert_eq!(
             serde_json::from_str::<NodeKind>("\"pool\"").expect("pool kind should deserialize"),
