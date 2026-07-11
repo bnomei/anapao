@@ -3,8 +3,8 @@ use std::collections::BTreeSet;
 use anapao::error::RunError;
 use anapao::events::VecEventSink;
 use anapao::types::{
-    AggregationConfig, BatchRunTemplate, CaptureConfig, CaptureSchedule, EdgeId, EndConditionSpec,
-    MetricKey, NodeId, RunConfig, ScenarioSpec, Selection, TransferSpec,
+    AggregationConfig, BatchConfig, BatchRunTemplate, CaptureConfig, CaptureSchedule, EdgeId,
+    EndConditionSpec, MetricKey, NodeId, RunConfig, ScenarioSpec, Selection, TransferSpec,
 };
 use anapao::Simulator;
 
@@ -180,6 +180,19 @@ fn batch_aggregation_rejects_unknown_or_empty_metric_selection() {
         "capture": {"capture_nodes":[],"capture_metrics":[],"every_n_steps":1,"include_step_zero":true,"include_final_state":true}
     }"#;
     assert!(serde_json::from_str::<BatchRunTemplate>(mixed).is_err());
+
+    let compiled = compiled_scenario();
+    let unknown_metric = MetricKey::fixture("missing");
+    let config = BatchConfig::for_runs(2).with_max_steps(4).with_aggregation(
+        AggregationConfig::default()
+            .with_metrics(Selection::Only(BTreeSet::from([unknown_metric]))),
+    );
+    let error = Simulator::run_batch(&compiled, &config)
+        .expect_err("unknown aggregation metric must fail before any seed runs");
+    assert!(matches!(
+        error,
+        RunError::InvalidRunConfig { name, .. } if name == "batch.aggregation.metrics.missing"
+    ));
 }
 
 #[test]

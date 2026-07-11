@@ -7,19 +7,21 @@
 
 use std::collections::BTreeMap;
 
-use crate::engine::run_single;
+use crate::engine::{
+    resolve_aggregation_selection, run_batch_sample, BatchSample, ResolvedAggregationSelection,
+};
 use crate::error::RunError;
 use crate::rng::derive_run_seed;
 use crate::types::{
-    BatchConfig, BatchReport, BatchRunSummary, ExecutionMode, RunConfig, RunReport, SeriesPoint,
-    SeriesTable,
+    BatchConfig, BatchReport, BatchRunSummary, CaptureConfig, ExecutionMode, RunConfig,
+    SeriesPoint, SeriesTable,
 };
 use crate::CompiledScenario;
 
 #[derive(Debug)]
-struct IndexedRunReport {
+struct IndexedBatchSample {
     run_index: u64,
-    report: RunReport,
+    sample: BatchSample,
 }
 
 /// Executes all batch runs and returns summaries plus step-aligned aggregate series.
@@ -30,19 +32,22 @@ pub(crate) fn run_batch(
     compiled: &CompiledScenario,
     config: &BatchConfig,
 ) -> Result<BatchReport, RunError> {
+    let resolved_metrics =
+        resolve_aggregation_selection(compiled, &config.run_template.aggregation)?;
     let execution_mode = resolved_execution_mode(&config.execution_mode);
-    let run_reports = execute_runs(compiled, config, &execution_mode)?;
+    let mut samples = execute_runs(compiled, config, &execution_mode, &resolved_metrics)?;
+    samples.sort_by_key(|entry| entry.run_index);
 
-    let aggregate_series = aggregate_series(&run_reports);
-    let runs = run_reports
+    let aggregate_series = aggregate_series(&samples);
+    let runs = samples
         .into_iter()
         .map(|entry| BatchRunSummary {
             run_index: entry.run_index,
-            seed: entry.report.seed,
-            completed: entry.report.completed,
-            steps_executed: entry.report.steps_executed,
-            final_metrics: entry.report.final_metrics,
-            manifest: entry.report.manifest,
+            seed: entry.sample.seed,
+            completed: entry.sample.completed,
+            steps_executed: entry.sample.steps_executed,
+            final_metrics: entry.sample.final_metrics,
+            manifest: entry.sample.manifest,
         })
         .collect::<Vec<_>>();
 
@@ -61,12 +66,13 @@ fn execute_runs(
     compiled: &CompiledScenario,
     config: &BatchConfig,
     execution_mode: &ExecutionMode,
-) -> Result<Vec<IndexedRunReport>, RunError> {
+    resolved_metrics: &ResolvedAggregationSelection,
+) -> Result<Vec<IndexedBatchSample>, RunError> {
     match execution_mode {
-        ExecutionMode::SingleThread => {
-            (0..config.runs).map(|run_index| execute_run(compiled, config, run_index)).collect()
-        }
-        ExecutionMode::Rayon => execute_parallel_runs(compiled, config),
+        ExecutionMode::SingleThread => (0..config.runs)
+            .map(|run_index| execute_run(compiled, config, run_index, resolved_metrics))
+            .collect(),
+        ExecutionMode::Rayon => execute_parallel_runs(compiled, config, resolved_metrics),
     }
 }
 
@@ -74,26 +80,37 @@ fn execute_run(
     compiled: &CompiledScenario,
     config: &BatchConfig,
     run_index: u64,
-) -> Result<IndexedRunReport, RunError> {
+    resolved_metrics: &ResolvedAggregationSelection,
+) -> Result<IndexedBatchSample, RunError> {
     let run_config = per_run_config(config, run_index);
-    let report = run_single(compiled, &run_config)?;
-    Ok(IndexedRunReport { run_index, report })
+    let sample = run_batch_sample(
+        compiled,
+        &run_config,
+        &config.run_template.aggregation,
+        resolved_metrics,
+    )?;
+    Ok(IndexedBatchSample { run_index, sample })
 }
 
 fn per_run_config(config: &BatchConfig, run_index: u64) -> RunConfig {
-    config.run_template.to_run_config(derive_run_seed(config.base_seed, run_index))
+    RunConfig {
+        seed: derive_run_seed(config.base_seed, run_index),
+        max_steps: config.run_template.max_steps,
+        capture: CaptureConfig::none(),
+    }
 }
 
 #[cfg(feature = "parallel")]
 fn execute_parallel_runs(
     compiled: &CompiledScenario,
     config: &BatchConfig,
-) -> Result<Vec<IndexedRunReport>, RunError> {
+    resolved_metrics: &ResolvedAggregationSelection,
+) -> Result<Vec<IndexedBatchSample>, RunError> {
     use rayon::prelude::*;
 
     (0..config.runs)
         .into_par_iter()
-        .map(|run_index| execute_run(compiled, config, run_index))
+        .map(|run_index| execute_run(compiled, config, run_index, resolved_metrics))
         .collect()
 }
 
@@ -101,8 +118,11 @@ fn execute_parallel_runs(
 fn execute_parallel_runs(
     compiled: &CompiledScenario,
     config: &BatchConfig,
-) -> Result<Vec<IndexedRunReport>, RunError> {
-    (0..config.runs).map(|run_index| execute_run(compiled, config, run_index)).collect()
+    resolved_metrics: &ResolvedAggregationSelection,
+) -> Result<Vec<IndexedBatchSample>, RunError> {
+    (0..config.runs)
+        .map(|run_index| execute_run(compiled, config, run_index, resolved_metrics))
+        .collect()
 }
 
 #[cfg(feature = "parallel")]
@@ -118,12 +138,12 @@ fn resolved_execution_mode(requested: &ExecutionMode) -> ExecutionMode {
 }
 
 fn aggregate_series(
-    run_reports: &[IndexedRunReport],
+    samples: &[IndexedBatchSample],
 ) -> BTreeMap<crate::types::MetricKey, SeriesTable> {
     let mut metric_steps = BTreeMap::<crate::types::MetricKey, BTreeMap<u64, (f64, u64)>>::new();
 
-    for entry in run_reports {
-        for (metric, table) in &entry.report.series {
+    for entry in samples {
+        for (metric, table) in &entry.sample.series {
             let step_values = metric_steps.entry(metric.clone()).or_default();
             for point in &table.points {
                 let (sum, count) = step_values.entry(point.step).or_insert((0.0, 0));
@@ -149,13 +169,16 @@ fn aggregate_series(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::{
+        collections::{BTreeSet, HashSet},
+        num::NonZeroU64,
+    };
 
     use crate::rng::derive_run_seed;
     use crate::types::{
-        AggregationConfig, BatchConfig, BatchRunTemplate, EdgeSpec, EndConditionSpec,
-        ExecutionMode, MetricKey, NodeId, NodeKind, NodeSpec, ScenarioId, ScenarioSpec,
-        TransferSpec,
+        AggregationConfig, BatchConfig, BatchRunTemplate, CaptureSchedule, EdgeSpec,
+        EndConditionSpec, ExecutionMode, MetricKey, NodeId, NodeKind, NodeSpec, ScenarioId,
+        ScenarioSpec, Selection, TransferSpec,
     };
     use crate::validation::compile_scenario;
 
@@ -244,6 +267,53 @@ mod tests {
                 "derived per-run seeds must stay unique for sampled run range"
             );
         }
+    }
+
+    #[test]
+    fn compact_samples_honor_aggregation_schedule_and_selection() {
+        let compiled = compiled_fixture();
+        let source = MetricKey::fixture("source");
+        let sink = MetricKey::fixture("sink");
+
+        let none = fixture_batch_config(4, 7, ExecutionMode::SingleThread)
+            .with_aggregation(AggregationConfig::none());
+        let none_report = run_batch(&compiled, &none).expect("none aggregation succeeds");
+        assert!(none_report.aggregate_series.is_empty());
+        assert!(none_report.runs.iter().all(|run| run.final_metrics.contains_key(&sink)));
+
+        let final_only = fixture_batch_config(4, 7, ExecutionMode::SingleThread)
+            .with_aggregation(AggregationConfig::final_only());
+        let final_report = run_batch(&compiled, &final_only).expect("final aggregation succeeds");
+        assert_eq!(
+            final_report.aggregate_series[&sink]
+                .points
+                .iter()
+                .map(|point| point.step)
+                .collect::<Vec<_>>(),
+            vec![3]
+        );
+
+        let periodic = fixture_batch_config(4, 7, ExecutionMode::SingleThread).with_aggregation(
+            AggregationConfig::default()
+                .with_schedule(CaptureSchedule::Every {
+                    stride: NonZeroU64::new(2).expect("positive stride"),
+                    include_initial: true,
+                    include_final: true,
+                })
+                .with_metrics(Selection::Only(BTreeSet::from([source.clone(), sink.clone()]))),
+        );
+        let periodic_report =
+            run_batch(&compiled, &periodic).expect("periodic aggregation succeeds");
+        assert_eq!(periodic_report.aggregate_series.len(), 2);
+        assert!(periodic_report.aggregate_series.contains_key(&source));
+        assert_eq!(
+            periodic_report.aggregate_series[&sink]
+                .points
+                .iter()
+                .map(|point| point.step)
+                .collect::<Vec<_>>(),
+            vec![0, 2, 3]
+        );
     }
 
     #[cfg(feature = "parallel")]

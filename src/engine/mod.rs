@@ -21,10 +21,11 @@ use crate::stochastic::{
     sample_weighted_index,
 };
 use crate::types::{
-    CaptureConfig, CaptureSchedule, ConnectionKind, EdgeId, EndConditionSpec, MetricKey,
-    NodeConfig, NodeId, NodeKind, NodeModeConfig, NodeSnapshot, RunConfig, RunReport, Selection,
-    SeriesPoint, SeriesTable, StateConnectionRole, StateConnectionTarget, TransferRecord,
-    TransferSpec, TriggerMode, VariableSnapshot, VariableSourceSpec, VariableUpdateTiming,
+    AggregationConfig, CaptureConfig, CaptureSchedule, ConnectionKind, EdgeId, EndConditionSpec,
+    ManifestRef, MetricKey, NodeConfig, NodeId, NodeKind, NodeModeConfig, NodeSnapshot, RunConfig,
+    RunReport, Selection, SeriesPoint, SeriesTable, StateConnectionRole, StateConnectionTarget,
+    TransferRecord, TransferSpec, TriggerMode, VariableSnapshot, VariableSourceSpec,
+    VariableUpdateTiming,
 };
 use crate::CompiledScenario;
 
@@ -50,21 +51,48 @@ struct FullReportCollector<'a> {
     report: RunReport,
     captured_steps: BTreeSet<u64>,
     step_transfers: Vec<TransferRecord>,
+    emit_transfers: bool,
 }
 
 trait TransferCollector {
+    fn wants_transfer_records(&self) -> bool;
     fn record_transfer(&mut self, transfer: TransferRecord);
 }
 
+trait RunCollector: TransferCollector {
+    type Output;
+
+    fn capture_step(
+        &mut self,
+        compiled: &CompiledScenario,
+        state: &EngineState,
+        runtime_variables: &BTreeMap<String, f64>,
+        force: bool,
+    );
+    fn captures_final(&self) -> bool;
+    fn take_step_transfers(&mut self) -> Vec<TransferRecord>;
+    fn finish(
+        self,
+        compiled: &CompiledScenario,
+        state: &EngineState,
+        completed: bool,
+    ) -> Self::Output;
+}
+
 impl<'a> FullReportCollector<'a> {
-    fn new(compiled: &CompiledScenario, config: &'a RunConfig) -> Self {
+    fn new(compiled: &CompiledScenario, config: &'a RunConfig, emit_transfers: bool) -> Self {
         Self {
             capture: &config.capture,
             report: RunReport::new(compiled.scenario_id().clone(), config.seed),
             captured_steps: BTreeSet::new(),
             step_transfers: Vec::new(),
+            emit_transfers,
         }
     }
+}
+
+impl RunCollector for FullReportCollector<'_> {
+    type Output = RunReport;
 
     fn capture_step(
         &mut self,
@@ -129,6 +157,10 @@ impl<'a> FullReportCollector<'a> {
         }
     }
 
+    fn captures_final(&self) -> bool {
+        captures_final(self.capture.schedule())
+    }
+
     fn take_step_transfers(&mut self) -> Vec<TransferRecord> {
         std::mem::take(&mut self.step_transfers)
     }
@@ -153,12 +185,159 @@ impl<'a> FullReportCollector<'a> {
 }
 
 impl TransferCollector for FullReportCollector<'_> {
+    fn wants_transfer_records(&self) -> bool {
+        self.emit_transfers || !self.capture.transfers().is_none()
+    }
+
     fn record_transfer(&mut self, transfer: TransferRecord) {
         if selected(self.capture.transfers(), &transfer.edge_id) {
             self.report.transfers.push(transfer.clone());
         }
         self.step_transfers.push(transfer);
     }
+}
+
+/// Private compact batch result produced by the shared engine loop.
+///
+/// Unlike [`RunReport`], this deliberately has no snapshots, transfers, or
+/// terminal node map. Batch aggregation needs only final metadata plus the
+/// explicitly requested metric observations.
+#[derive(Debug)]
+pub(crate) struct BatchSample {
+    pub(crate) seed: u64,
+    pub(crate) completed: bool,
+    pub(crate) steps_executed: u64,
+    pub(crate) final_metrics: BTreeMap<MetricKey, f64>,
+    pub(crate) manifest: Option<ManifestRef>,
+    pub(crate) series: BTreeMap<MetricKey, SeriesTable>,
+}
+
+/// Batch-only metric selection resolved from the immutable compiled plan before
+/// any seed starts. Keeping this private prevents the compiled-plan lookup from
+/// leaking into the per-step compact collector path.
+#[derive(Debug)]
+pub(crate) enum ResolvedAggregationSelection {
+    None,
+    All,
+    Only(Vec<ResolvedAggregationMetric>),
+}
+
+#[derive(Debug)]
+pub(crate) struct ResolvedAggregationMetric {
+    metric: MetricKey,
+    source: ResolvedAggregationMetricSource,
+}
+
+#[derive(Debug)]
+enum ResolvedAggregationMetricSource {
+    Node(usize),
+    TrackedTotal,
+}
+
+impl ResolvedAggregationMetric {
+    fn value(&self, state: &EngineState) -> f64 {
+        match self.source {
+            ResolvedAggregationMetricSource::Node(index) => {
+                canonicalize_float(state.node_values[index])
+            }
+            ResolvedAggregationMetricSource::TrackedTotal => total_node_value(state),
+        }
+    }
+}
+
+/// Private compact collector for batch aggregation.
+///
+/// It is intentionally separate from `FullReportCollector`: batch execution
+/// never allocates report-only diagnostics that it would immediately discard.
+struct BatchSampleCollector<'a> {
+    aggregation: &'a AggregationConfig,
+    metrics: &'a ResolvedAggregationSelection,
+    last_captured_step: Option<u64>,
+    series: BTreeMap<MetricKey, SeriesTable>,
+    seed: u64,
+}
+
+impl<'a> BatchSampleCollector<'a> {
+    fn new(
+        aggregation: &'a AggregationConfig,
+        metrics: &'a ResolvedAggregationSelection,
+        seed: u64,
+    ) -> Self {
+        Self { aggregation, metrics, last_captured_step: None, series: BTreeMap::new(), seed }
+    }
+}
+
+impl RunCollector for BatchSampleCollector<'_> {
+    type Output = BatchSample;
+
+    fn capture_step(
+        &mut self,
+        _compiled: &CompiledScenario,
+        state: &EngineState,
+        _runtime_variables: &BTreeMap<String, f64>,
+        force: bool,
+    ) {
+        if !should_capture_aggregation_step(self.aggregation, state.step, force)
+            || self.last_captured_step == Some(state.step)
+        {
+            return;
+        }
+        self.last_captured_step = Some(state.step);
+
+        match self.metrics {
+            ResolvedAggregationSelection::None => {}
+            ResolvedAggregationSelection::All => {
+                for (metric, value) in &state.metrics {
+                    let table = self
+                        .series
+                        .entry(metric.clone())
+                        .or_insert_with(|| SeriesTable::new(metric.clone()));
+                    table.points.push(SeriesPoint::new(state.step, canonicalize_float(*value)));
+                }
+            }
+            ResolvedAggregationSelection::Only(metrics) => {
+                for metric in metrics {
+                    let table = self
+                        .series
+                        .entry(metric.metric.clone())
+                        .or_insert_with(|| SeriesTable::new(metric.metric.clone()));
+                    table.points.push(SeriesPoint::new(state.step, metric.value(state)));
+                }
+            }
+        }
+    }
+
+    fn captures_final(&self) -> bool {
+        captures_final(self.aggregation.schedule())
+    }
+
+    fn take_step_transfers(&mut self) -> Vec<TransferRecord> {
+        Vec::new()
+    }
+
+    fn finish(
+        self,
+        _compiled: &CompiledScenario,
+        state: &EngineState,
+        completed: bool,
+    ) -> BatchSample {
+        BatchSample {
+            seed: self.seed,
+            completed,
+            steps_executed: state.step,
+            final_metrics: state.metrics.clone(),
+            manifest: None,
+            series: self.series,
+        }
+    }
+}
+
+impl TransferCollector for BatchSampleCollector<'_> {
+    fn wants_transfer_records(&self) -> bool {
+        false
+    }
+
+    fn record_transfer(&mut self, _transfer: TransferRecord) {}
 }
 
 #[derive(Debug)]
@@ -575,7 +754,7 @@ pub(crate) fn run_single(
     config: &RunConfig,
 ) -> Result<RunReport, RunError> {
     let mut emit = |_event: RunEvent| Ok(());
-    run_single_internal(compiled, config, "run-0", false, &mut emit)
+    run_single_internal(compiled, config, "run-0", false, false, &mut emit)
 }
 
 /// Advances one run while pushing live events to `sink` as steps progress.
@@ -586,7 +765,7 @@ pub(crate) fn run_single_streaming(
     sink: &mut dyn EventSink,
 ) -> Result<RunReport, RunError> {
     let mut emit = |event: RunEvent| sink.push(event).map_err(map_event_sink_error);
-    run_single_internal(compiled, config, run_id, false, &mut emit)
+    run_single_internal(compiled, config, run_id, false, true, &mut emit)
 }
 
 /// Streams run events but defers the terminal `step_end` for assertion interleaving.
@@ -600,7 +779,27 @@ pub(crate) fn run_single_streaming_for_assertions(
     sink: &mut dyn EventSink,
 ) -> Result<RunReport, RunError> {
     let mut emit = |event: RunEvent| sink.push(event).map_err(map_event_sink_error);
-    run_single_internal(compiled, config, run_id, true, &mut emit)
+    run_single_internal(compiled, config, run_id, true, true, &mut emit)
+}
+
+/// Runs one batch seed through the shared transition loop without allocating a
+/// full [`RunReport`]. The batch entry point validates `aggregation` once before
+/// calling this helper for individual seeds.
+pub(crate) fn run_batch_sample(
+    compiled: &CompiledScenario,
+    config: &RunConfig,
+    aggregation: &AggregationConfig,
+    metrics: &ResolvedAggregationSelection,
+) -> Result<BatchSample, RunError> {
+    let mut emit = |_event: RunEvent| Ok(());
+    run_collected(
+        compiled,
+        config,
+        "run-0",
+        false,
+        BatchSampleCollector::new(aggregation, metrics, config.seed),
+        &mut emit,
+    )
 }
 
 fn run_single_internal(
@@ -608,11 +807,28 @@ fn run_single_internal(
     config: &RunConfig,
     run_id: &str,
     defer_terminal_step_end: bool,
+    emit_transfers: bool,
     emit_event: &mut dyn FnMut(RunEvent) -> Result<(), RunError>,
 ) -> Result<RunReport, RunError> {
     validate_capture_selection(compiled, config)?;
+    run_collected(
+        compiled,
+        config,
+        run_id,
+        defer_terminal_step_end,
+        FullReportCollector::new(compiled, config, emit_transfers),
+        emit_event,
+    )
+}
 
-    let mut collector = FullReportCollector::new(compiled, config);
+fn run_collected<C: RunCollector>(
+    compiled: &CompiledScenario,
+    config: &RunConfig,
+    run_id: &str,
+    defer_terminal_step_end: bool,
+    mut collector: C,
+    emit_event: &mut dyn FnMut(RunEvent) -> Result<(), RunError>,
+) -> Result<C::Output, RunError> {
     let mut state = init_state(compiled);
     let runtime = ExprRuntime::new();
     let expression_cache = ExpressionPlanRef::new(compiled);
@@ -704,7 +920,7 @@ fn run_single_internal(
         }
     }
 
-    if captures_final(config.capture.schedule()) {
+    if collector.captures_final() {
         collector.capture_step(compiled, &state, variables.values(), true);
     }
 
@@ -1395,14 +1611,16 @@ fn apply_transfer_plan(
     timeline.record_release(compiled, from_node_id, transfer);
     timeline.record_arrival(compiled, to_node_id, transfer, step);
 
-    transfer_collector.record_transfer(TransferRecord {
-        step,
-        edge_id: plan.edge_id,
-        from_node_id: plan.from_node_id,
-        to_node_id: plan.to_node_id,
-        requested_amount: canonicalize_float(plan.requested),
-        transferred_amount: canonicalize_float(transfer),
-    });
+    if transfer_collector.wants_transfer_records() {
+        transfer_collector.record_transfer(TransferRecord {
+            step,
+            edge_id: plan.edge_id,
+            from_node_id: plan.from_node_id,
+            to_node_id: plan.to_node_id,
+            requested_amount: canonicalize_float(plan.requested),
+            transferred_amount: canonicalize_float(transfer),
+        });
+    }
     Ok(())
 }
 
@@ -1963,12 +2181,64 @@ fn validate_capture_selection(
     Ok(())
 }
 
+/// Resolves concrete batch aggregation metrics against the finalized plan.
+///
+/// This deliberately runs once at batch entry; compact collectors consume the
+/// resolved values for every derived seed and never look up compiled metrics.
+pub(crate) fn resolve_aggregation_selection(
+    compiled: &CompiledScenario,
+    aggregation: &AggregationConfig,
+) -> Result<ResolvedAggregationSelection, RunError> {
+    aggregation.validate().map_err(|reason| RunError::InvalidRunConfig {
+        name: "batch.aggregation".to_string(),
+        reason: reason.to_string(),
+    })?;
+
+    match aggregation.metrics() {
+        Selection::None => Ok(ResolvedAggregationSelection::None),
+        Selection::All => Ok(ResolvedAggregationSelection::All),
+        Selection::Only(metrics) => metrics
+            .iter()
+            .map(|metric| {
+                let source = if let Some(index) = metric_node_index(compiled, metric) {
+                    ResolvedAggregationMetricSource::Node(index)
+                } else if compiled.tracked_metrics().contains(metric) {
+                    ResolvedAggregationMetricSource::TrackedTotal
+                } else {
+                    return Err(RunError::InvalidRunConfig {
+                        name: format!("batch.aggregation.metrics.{metric}"),
+                        reason: "does not resolve to a tracked metric or node".to_string(),
+                    });
+                };
+                Ok(ResolvedAggregationMetric { metric: metric.clone(), source })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(ResolvedAggregationSelection::Only),
+    }
+}
+
 fn should_capture_step(capture: &CaptureConfig, step: u64, force: bool) -> bool {
     if force {
         return true;
     }
 
     match capture.schedule() {
+        CaptureSchedule::None | CaptureSchedule::Final => false,
+        CaptureSchedule::Every { stride, include_initial, .. } if step == 0 => *include_initial,
+        CaptureSchedule::Every { stride, .. } => step % stride.get() == 0,
+    }
+}
+
+fn should_capture_aggregation_step(
+    aggregation: &AggregationConfig,
+    step: u64,
+    force: bool,
+) -> bool {
+    if force {
+        return true;
+    }
+
+    match aggregation.schedule() {
         CaptureSchedule::None | CaptureSchedule::Final => false,
         CaptureSchedule::Every { stride, include_initial, .. } if step == 0 => *include_initial,
         CaptureSchedule::Every { stride, .. } => step % stride.get() == 0,

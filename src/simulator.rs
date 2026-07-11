@@ -512,6 +512,32 @@ mod tests {
     }
 
     #[test]
+    fn simulator_batch_final_assertions_and_events_survive_aggregation_none() {
+        let compiled = fixture_compiled_scenario().expect("compiled fixture");
+        let config = deterministic_batch_config().with_aggregation(AggregationConfig::none());
+        let expectations = vec![Expectation::Equals {
+            metric: MetricKey::fixture("sink"),
+            selector: MetricSelector::Final,
+            expected: 3.0,
+        }];
+        let mut sink = VecEventSink::new();
+
+        let (report, assertion_report) = Simulator::run_batch_with_assertions_and_sink(
+            &compiled,
+            &config,
+            &expectations,
+            &mut sink,
+        )
+        .expect("final assertions do not require aggregate series");
+
+        assert!(report.aggregate_series.is_empty());
+        assert_eq!(assertion_report.failed, 0);
+        let names = sink.events().iter().map(|event| event.event_name()).collect::<Vec<_>>();
+        assert!(names.contains(&"metric_snapshot"));
+        assert!(names.contains(&"assertion_checkpoint"));
+    }
+
+    #[test]
     fn simulator_run_with_malformed_expectation_streams_no_events() {
         let compiled = fixture_compiled_scenario().expect("compiled fixture");
         let mut sink = VecEventSink::new();

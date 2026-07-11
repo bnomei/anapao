@@ -27,6 +27,8 @@ target/*
 
 docs/
 .frigg
+.orchid
+.devana
 
 # Generated flamegraphs + derived CSV/JSON summaries
 benchmarks/profiles/

@@ -475,19 +475,6 @@ impl BatchRunTemplate {
     pub fn with_capture(self, capture: CaptureConfig) -> Self {
         self.with_aggregation(AggregationConfig::from_capture(capture))
     }
-
-    /// Builds a concrete run config for one derived seed.
-    #[must_use]
-    pub fn to_run_config(&self, seed: u64) -> RunConfig {
-        // T002 sequencing adapter: batch still executes the legacy full-report
-        // path until T003 replaces it with compact per-run state. Start from the
-        // full default capture policy so transfer retention remains `All`, then
-        // replace only the aggregation-backed schedule and metric selection.
-        let capture = CaptureConfig::default()
-            .with_schedule(self.aggregation.schedule.clone())
-            .with_metrics(self.aggregation.metrics.clone());
-        RunConfig { seed, max_steps: self.max_steps, capture }
-    }
 }
 
 #[derive(Serialize)]
