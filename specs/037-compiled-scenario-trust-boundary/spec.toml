@@ -1,0 +1,30 @@
+spec_id = "037-compiled-scenario-trust-boundary"
+name = "Compiled scenario trust boundary"
+depends_on = []
+global_scope = [
+  "src/plan.rs",
+  "src/validation/",
+  "src/engine/",
+  "src/batch/",
+  "src/simulator.rs",
+  "src/expr/mod.rs",
+  "src/types/identifiers.rs",
+  "src/types/mod.rs",
+  "src/lib.rs",
+  "src/prelude.rs",
+  "src/testkit/",
+  "tests/public_api.rs",
+  "tests/perf_determinism.rs",
+  "tests/rstest_testkit.rs",
+  "tests/parity/differential.rs",
+  "tests/readme_snippets.rs",
+  "benches/simulation.rs",
+  "README.md",
+  "CHANGELOG.md",
+]
+spec_kind = "migration"
+execution_policy = "auto-continue"
+fanout_policy = "parallel-when-ready"
+human_checkpoint = "on-blocker"
+commit_policy = "after-validation"
+review_policy = "required"

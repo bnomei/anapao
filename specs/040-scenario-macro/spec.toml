@@ -1,0 +1,24 @@
+spec_id = "040-scenario-macro"
+name = "Complete checked scenario macro"
+depends_on = ["039-checked-scenario-authoring"]
+global_scope = [
+  "src/scenario_macro.rs",
+  "src/lib.rs",
+  "src/prelude.rs",
+  "Cargo.toml",
+  "Cargo.lock",
+  "tests/scenario_macro.rs",
+  "tests/scenario_macro_ui.rs",
+  "tests/ui/scenario_macro/pass",
+  "tests/ui/scenario_macro/fail",
+  "tests/scenario_macro_renamed.rs",
+  "tests/fixtures/scenario-macro-renamed",
+  "README.md",
+  "tests/readme_snippets.rs",
+]
+spec_kind = "feature"
+execution_policy = "auto-continue"
+fanout_policy = "serial"
+human_checkpoint = "before-implementation"
+commit_policy = "after-validation"
+review_policy = "required"

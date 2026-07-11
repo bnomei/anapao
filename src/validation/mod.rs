@@ -917,10 +917,7 @@ mod tests {
                 VariableSourceSpec::RandomList { values: vec![f64::NAN] },
                 "variables.sources.roll.values[0]",
             ),
-            (
-                VariableSourceSpec::RandomMatrix { values: vec![] },
-                "variables.sources.roll.values",
-            ),
+            (VariableSourceSpec::RandomMatrix { values: vec![] }, "variables.sources.roll.values"),
             (
                 VariableSourceSpec::RandomMatrix { values: vec![vec![]] },
                 "variables.sources.roll.values[0]",
@@ -929,10 +926,7 @@ mod tests {
                 VariableSourceSpec::RandomMatrix { values: vec![vec![f64::INFINITY]] },
                 "variables.sources.roll.values[0][0]",
             ),
-            (
-                VariableSourceSpec::Constant { value: f64::NAN },
-                "variables.sources.roll.value",
-            ),
+            (VariableSourceSpec::Constant { value: f64::NAN }, "variables.sources.roll.value"),
         ];
 
         for (source_spec, expected_name) in cases {
@@ -1603,7 +1597,10 @@ mod tests {
         let delay_spec = ScenarioSpec::new(ScenarioId::fixture("scenario"))
             .with_node(NodeSpec::new(source.clone(), NodeKind::Source))
             .with_node(NodeSpec::new(delay.clone(), NodeKind::Delay).with_config(
-                NodeConfig::Delay(DelayNodeConfig { delay_steps: 5, mode: NodeModeConfig::default() }),
+                NodeConfig::Delay(DelayNodeConfig {
+                    delay_steps: 5,
+                    mode: NodeModeConfig::default(),
+                }),
             ))
             .with_edge(modifier_edge(delay));
 

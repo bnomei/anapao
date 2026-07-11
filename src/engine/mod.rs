@@ -2299,9 +2299,7 @@ mod tests {
         let sink_b = NodeId::fixture("sink-b");
 
         let mut scenario = ScenarioSpec::new(ScenarioId::fixture("scenario-zero-fraction-gate"))
-            .with_node(
-                NodeSpec::new(gate.clone(), NodeKind::SortingGate).with_initial_value(4.0),
-            )
+            .with_node(NodeSpec::new(gate.clone(), NodeKind::SortingGate).with_initial_value(4.0))
             .with_node(NodeSpec::new(sink_a.clone(), NodeKind::Pool))
             .with_node(NodeSpec::new(sink_b.clone(), NodeKind::Pool))
             .with_edge(EdgeSpec::new(
@@ -2334,7 +2332,12 @@ mod tests {
         let node_c = NodeId::fixture("c-sink");
 
         let mut scenario = ScenarioSpec::new(ScenarioId::fixture("scenario-push-all-zero"))
-            .with_node(pool_with_mode("a-source", 10.0, TriggerMode::Automatic, ActionMode::PushAll))
+            .with_node(pool_with_mode(
+                "a-source",
+                10.0,
+                TriggerMode::Automatic,
+                ActionMode::PushAll,
+            ))
             .with_node(NodeSpec::new(node_b.clone(), NodeKind::Pool))
             .with_node(NodeSpec::new(node_c.clone(), NodeKind::Pool))
             .with_edge(EdgeSpec::new(
@@ -3107,15 +3110,13 @@ mod tests {
 
         let mut scenario = ScenarioSpec::new(ScenarioId::fixture("scenario-pool-capacity"))
             .with_node(pool_with_mode("source", 100.0, TriggerMode::Automatic, ActionMode::PushAny))
-            .with_node(
-                NodeSpec::new(pool.clone(), NodeKind::Pool).with_config(NodeConfig::Pool(
-                    PoolNodeConfig {
-                        capacity: Some(10),
-                        allow_negative_start: false,
-                        mode: NodeModeConfig::default(),
-                    },
-                )),
-            )
+            .with_node(NodeSpec::new(pool.clone(), NodeKind::Pool).with_config(NodeConfig::Pool(
+                PoolNodeConfig {
+                    capacity: Some(10),
+                    allow_negative_start: false,
+                    mode: NodeModeConfig::default(),
+                },
+            )))
             .with_edge(EdgeSpec::new(
                 EdgeId::fixture("edge-source-pool"),
                 source.clone(),

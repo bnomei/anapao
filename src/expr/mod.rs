@@ -642,9 +642,7 @@ fn eval_call(
         "max" => binary("max", &evaluated, f64::max),
         "pow" => binary("pow", &evaluated, f64::powf),
         // `f64::clamp` panics if min > max; normalize so inverted expr args never panic.
-        "clamp" => {
-            ternary("clamp", &evaluated, |value, a, b| value.clamp(a.min(b), a.max(b)))
-        }
+        "clamp" => ternary("clamp", &evaluated, |value, a, b| value.clamp(a.min(b), a.max(b))),
         _ => Err(ExprError::UnknownFunction { name: name.to_string() }),
     }
 }
@@ -671,9 +669,7 @@ where
         "min" => binary("min", &evaluated, f64::min),
         "max" => binary("max", &evaluated, f64::max),
         "pow" => binary("pow", &evaluated, f64::powf),
-        "clamp" => {
-            ternary("clamp", &evaluated, |value, a, b| value.clamp(a.min(b), a.max(b)))
-        }
+        "clamp" => ternary("clamp", &evaluated, |value, a, b| value.clamp(a.min(b), a.max(b))),
         _ => Err(ExprError::UnknownFunction { name: name.to_string() }),
     }
 }

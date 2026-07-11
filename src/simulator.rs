@@ -556,9 +556,9 @@ mod tests {
         .expect("batch with assertions should succeed");
 
         let events = sink.events();
-        assert!(events.iter().any(|event| {
-            matches!(event.order().phase, RunEventPhase::AssertionCheckpoint)
-        }));
+        assert!(events
+            .iter()
+            .any(|event| { matches!(event.order().phase, RunEventPhase::AssertionCheckpoint) }));
         assert!(
             events.windows(2).all(|pair| pair[0].order() <= pair[1].order()),
             "raw batch+assertion sink order must already be monotonic"

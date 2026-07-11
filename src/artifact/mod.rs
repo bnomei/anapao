@@ -1210,11 +1210,8 @@ mod tests {
             .map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         on_disk.sort();
-        let mut declared = manifest
-            .artifacts
-            .values()
-            .map(|artifact| artifact.path.clone())
-            .collect::<Vec<_>>();
+        let mut declared =
+            manifest.artifacts.values().map(|artifact| artifact.path.clone()).collect::<Vec<_>>();
         declared.sort();
         assert_eq!(on_disk, declared);
     }
