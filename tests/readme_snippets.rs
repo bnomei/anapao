@@ -1,8 +1,8 @@
 use std::fs;
 
 use anapao::types::{
-    BatchConfig, BatchRunTemplate, CaptureConfig, CaptureSchedule, EndConditionSpec, ExecutionMode,
-    MetricKey, RunConfig, ScenarioSpec, TransferSpec,
+    AggregationConfig, BatchConfig, BatchRunTemplate, CaptureConfig, CaptureSchedule,
+    EndConditionSpec, ExecutionMode, MetricKey, RunConfig, ScenarioSpec, TransferSpec,
 };
 use anapao::Simulator;
 
@@ -59,6 +59,15 @@ fn readme_s07_create_batch_config() {
 }
 
 #[test]
+fn readme_batch_aggregation_is_separate_from_diagnostic_capture() {
+    let batch = BatchConfig::for_runs(64)
+        .with_execution_mode(ExecutionMode::SingleThread)
+        .with_aggregation(AggregationConfig::default().with_schedule(CaptureSchedule::Final));
+
+    assert!(matches!(batch.run_template.aggregation.schedule(), CaptureSchedule::Final));
+}
+
+#[test]
 fn readme_linear_pipeline_convenience_constructor_compiles_and_runs() {
     let compiled =
         Simulator::compile(ScenarioSpec::linear_pipeline(4)).expect("compile linear pipeline");
@@ -83,6 +92,7 @@ fn readme_contains_curated_builder_snippet_signatures() {
         "CaptureConfig::default().with_schedule(CaptureSchedule::Every {",
         "### Snippet S07 — Create BatchConfig",
         "let batch = BatchConfig::for_runs(64)",
+        "Batch aggregation is separate from per-run diagnostic capture.",
     ] {
         assert!(readme.contains(needle), "README drift: missing snippet marker `{needle}`");
     }

@@ -403,8 +403,8 @@ mod tests {
     }
 
     #[test]
-    fn batch_config_builders_update_execution_and_run_template() {
-        let capture = CaptureConfig::default().with_schedule(CaptureSchedule::Every {
+    fn batch_config_builders_update_execution_and_aggregation() {
+        let aggregation = AggregationConfig::default().with_schedule(CaptureSchedule::Every {
             stride: std::num::NonZeroU64::new(3).expect("positive stride"),
             include_initial: false,
             include_final: true,
@@ -414,13 +414,13 @@ mod tests {
             .with_base_seed(991)
             .with_run_template(BatchRunTemplate::default())
             .with_max_steps(40)
-            .with_capture(capture.clone());
+            .with_aggregation(aggregation.clone());
 
         assert_eq!(batch.runs, 12);
         assert_eq!(batch.base_seed, 991);
         assert_eq!(batch.execution_mode, ExecutionMode::SingleThread);
         assert_eq!(batch.run_template.max_steps, 40);
-        assert_eq!(batch.run_template.capture, capture);
+        assert_eq!(batch.run_template.aggregation, aggregation);
     }
 
     #[test]

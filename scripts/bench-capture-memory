@@ -1,0 +1,270 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Capture isolated DHAT heap evidence for the fixed capture-retention workloads.
+# This script deliberately has no performance threshold: it only rejects absent,
+# malformed, or incomparable evidence, leaving any regression decision explicit.
+
+readonly CASE_IDS=(single_full_256 batch_none_256x256 batch_all_256x256)
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  ./scripts/bench-capture-memory save --baseline NAME
+  ./scripts/bench-capture-memory compare --baseline NAME
+
+Runs each fixed DHAT case in a separate process and writes machine-readable
+evidence beneath target/capture-memory/. `compare` prints absolute and relative
+peak-live-heap deltas without applying a pass/fail performance threshold.
+Use `save --baseline NAME --case CASE_ID` only to resume an interrupted capture;
+metadata is written once all fixed cases are present.
+USAGE
+}
+
+die() {
+  echo "error: $*" >&2
+  exit 2
+}
+
+require_uv() {
+  command -v uv >/dev/null 2>&1 || die "uv is required to validate benchmark JSON"
+}
+
+sanitize_baseline() {
+  local value="$1"
+  value="${value// /-}"
+  value="${value//\//-}"
+  value="$(printf '%s' "$value" | tr -c 'A-Za-z0-9._-\n' '-' | tr -s '-')"
+  value="${value#-}"
+  value="${value%-}"
+  [[ -n "$value" ]] || die "--baseline resolved to an empty name"
+  printf '%s' "$value"
+}
+
+write_case_json() {
+  local case_id="$1"
+  local output_file="$2"
+  local raw_file
+  raw_file="$(mktemp)"
+  trap 'rm -f "$raw_file"' RETURN
+
+  ANAPAO_DHAT_OUTPUT="${output_file%.json}.dhat.json" \
+    cargo bench --bench capture_memory -- "$case_id" >"$raw_file" 2>&1
+  UV_CACHE_DIR="${UV_CACHE_DIR:-target/.uv-cache}" uv run --no-project python - \
+    "$case_id" "$raw_file" "$output_file" <<'PY'
+import json
+import pathlib
+import sys
+
+case_id, raw_path, output_path = sys.argv[1:]
+raw = pathlib.Path(raw_path).read_text()
+records = []
+for line in raw.splitlines():
+    line = line.strip()
+    if not line.startswith("{"):
+        continue
+    try:
+        value = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    if value.get("case_id") == case_id:
+        records.append(value)
+
+if len(records) != 1:
+    raise SystemExit(f"expected exactly one JSON result for {case_id}, found {len(records)}")
+
+record = records[0]
+required = ("total_bytes", "max_bytes", "current_bytes", "checksum")
+if any(not isinstance(record.get(key), int) or record[key] < 0 for key in required):
+    raise SystemExit(f"invalid numeric DHAT result for {case_id}: {record}")
+
+pathlib.Path(output_path).write_text(json.dumps(record, sort_keys=True) + "\n")
+PY
+  trap - RETURN
+  rm -f "$raw_file"
+}
+
+write_metadata() {
+  local directory="$1"
+  local baseline="$2"
+  UV_CACHE_DIR="${UV_CACHE_DIR:-target/.uv-cache}" uv run --no-project python - \
+    "$directory/metadata.json" "$baseline" "$(uname -a)" "$(rustc -Vv)" <<'PY'
+import json
+import pathlib
+import sys
+
+path, baseline, host, rustc_vv = sys.argv[1:]
+pathlib.Path(path).write_text(json.dumps({
+    "baseline": baseline,
+    "cases": ["single_full_256", "batch_none_256x256", "batch_all_256x256"],
+    "features": "default",
+    "host": host,
+    "rustc_vv": rustc_vv,
+}, sort_keys=True) + "\n")
+PY
+}
+
+validate_persisted_evidence() {
+  local directory="$1"
+  UV_CACHE_DIR="${UV_CACHE_DIR:-target/.uv-cache}" uv run --no-project python - \
+    "$directory" <<'PY'
+import json
+import pathlib
+import sys
+
+directory = pathlib.Path(sys.argv[1])
+case_ids = ("single_full_256", "batch_none_256x256", "batch_all_256x256")
+required_numeric = ("total_bytes", "max_bytes", "current_bytes", "checksum")
+
+try:
+    metadata = json.loads((directory / "metadata.json").read_text())
+except (OSError, json.JSONDecodeError) as error:
+    raise SystemExit(f"invalid evidence metadata in {directory}: {error}")
+
+if not isinstance(metadata, dict):
+    raise SystemExit(f"invalid evidence metadata in {directory}: expected object")
+if metadata.get("cases") != list(case_ids):
+    raise SystemExit(f"invalid evidence metadata in {directory}: fixed case IDs are required")
+for field in ("baseline", "features", "host", "rustc_vv"):
+    if not isinstance(metadata.get(field), str) or not metadata[field]:
+        raise SystemExit(f"invalid evidence metadata in {directory}: missing {field}")
+
+for case_id in case_ids:
+    path = directory / f"{case_id}.json"
+    try:
+        record = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise SystemExit(f"invalid evidence case {case_id} in {directory}: {error}")
+    if not isinstance(record, dict):
+        raise SystemExit(f"invalid evidence case {case_id} in {directory}: expected object")
+    if record.get("case_id") != case_id:
+        raise SystemExit(
+            f"invalid evidence case {case_id} in {directory}: embedded case_id must match file"
+        )
+    for field in required_numeric:
+        value = record.get(field)
+        if type(value) is not int or value < 0:
+            raise SystemExit(
+                f"invalid evidence case {case_id} in {directory}: {field} must be a nonnegative integer"
+            )
+PY
+}
+
+save() {
+  local baseline="$1"
+  local selected_case="${2:-}"
+  local directory="target/capture-memory/$baseline"
+  mkdir -p "$directory"
+  local -a cases=("${CASE_IDS[@]}")
+  if [[ -n "$selected_case" ]]; then
+    cases=("$selected_case")
+  fi
+  for case_id in "${cases[@]}"; do
+    echo "case: $case_id"
+    write_case_json "$case_id" "$directory/$case_id.json"
+  done
+  local case_id
+  for case_id in "${CASE_IDS[@]}"; do
+    [[ -f "$directory/$case_id.json" ]] || return 0
+  done
+  write_metadata "$directory" "$baseline"
+  validate_persisted_evidence "$directory"
+  echo "saved: $directory"
+}
+
+compare() {
+  local baseline="$1"
+  local baseline_directory="target/capture-memory/$baseline"
+  validate_persisted_evidence "$baseline_directory"
+
+  local candidate_directory="target/capture-memory/compare-$baseline-$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$candidate_directory"
+  for case_id in "${CASE_IDS[@]}"; do
+    echo "case: $case_id"
+    write_case_json "$case_id" "$candidate_directory/$case_id.json"
+  done
+  write_metadata "$candidate_directory" "$baseline"
+  validate_persisted_evidence "$candidate_directory"
+
+  UV_CACHE_DIR="${UV_CACHE_DIR:-target/.uv-cache}" uv run --no-project python - \
+    "$baseline_directory" "$candidate_directory" <<'PY'
+import json
+import pathlib
+import sys
+
+baseline_dir = pathlib.Path(sys.argv[1])
+candidate_dir = pathlib.Path(sys.argv[2])
+baseline_meta = json.loads((baseline_dir / "metadata.json").read_text())
+candidate_meta = json.loads((candidate_dir / "metadata.json").read_text())
+if baseline_meta["cases"] != candidate_meta["cases"]:
+    raise SystemExit("incomparable evidence: case IDs differ")
+if baseline_meta["features"] != candidate_meta["features"]:
+    raise SystemExit("incomparable evidence: feature sets differ")
+
+rows = []
+for case_id in baseline_meta["cases"]:
+    before = json.loads((baseline_dir / f"{case_id}.json").read_text())
+    after = json.loads((candidate_dir / f"{case_id}.json").read_text())
+    if before["checksum"] != after["checksum"]:
+        raise SystemExit(f"incomparable evidence: checksum changed for {case_id}")
+    baseline = before["max_bytes"]
+    candidate = after["max_bytes"]
+    absolute = candidate - baseline
+    relative = None if baseline == 0 else absolute / baseline
+    rows.append({
+        "case_id": case_id,
+        "baseline_max_bytes": baseline,
+        "candidate_max_bytes": candidate,
+        "absolute_delta_bytes": absolute,
+        "relative_delta": relative,
+        "checksum": after["checksum"],
+    })
+
+report = {
+    "baseline_directory": str(baseline_dir),
+    "candidate_directory": str(candidate_dir),
+    "cases": rows,
+}
+report_path = candidate_dir / "comparison.json"
+report_path.write_text(json.dumps(report, sort_keys=True) + "\n")
+print(json.dumps(report, sort_keys=True))
+PY
+}
+
+main() {
+  require_uv
+  local command="${1:-}"
+  [[ "$command" == "save" || "$command" == "compare" ]] || { usage >&2; exit 2; }
+  shift
+  local baseline=""
+  local case_id=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --baseline)
+        [[ -n "${2:-}" ]] || die "--baseline requires NAME"
+        baseline="$2"
+        shift 2
+        ;;
+      --case)
+        [[ "$command" == "save" && -n "${2:-}" ]] || die "--case is valid only for save"
+        case_id="$2"
+        shift 2
+        ;;
+      *)
+        die "unknown argument: $1"
+        ;;
+    esac
+  done
+  [[ -n "$baseline" ]] || die "$command requires --baseline NAME"
+  baseline="$(sanitize_baseline "$baseline")"
+  if [[ -n "$case_id" ]] && [[ ! " ${CASE_IDS[*]} " == *" $case_id "* ]]; then
+    die "unknown case: $case_id"
+  fi
+  if [[ "$command" == "save" ]]; then
+    save "$baseline" "$case_id"
+  else
+    compare "$baseline"
+  fi
+}
+
+main "$@"

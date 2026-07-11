@@ -10,7 +10,8 @@ use anapao::testkit::pikmin::{
     PikminFixtureTuning,
 };
 use anapao::types::{
-    BatchConfig, BatchRunTemplate, CaptureConfig, ExecutionMode, MetricKey, RunConfig,
+    AggregationConfig, BatchConfig, BatchRunTemplate, CaptureConfig, ExecutionMode, MetricKey,
+    RunConfig,
 };
 use anapao::Simulator;
 
@@ -84,7 +85,10 @@ fn pikmin_diagram_batch_probability_band_for_good_ending_threshold() {
         runs: 256,
         base_seed: 0x5050,
         execution_mode: ExecutionMode::SingleThread,
-        run_template: BatchRunTemplate { max_steps: 60, capture: CaptureConfig::final_only() },
+        run_template: BatchRunTemplate {
+            max_steps: 60,
+            aggregation: AggregationConfig::final_only(),
+        },
     };
     let expectations = vec![Expectation::ProbabilityBand {
         metric: ship_parts_metric_key(),
@@ -113,7 +117,10 @@ fn pikmin_diagram_balance_guardrails_from_prediction_indicators() {
         runs: 256,
         base_seed: 0x6060,
         execution_mode: ExecutionMode::SingleThread,
-        run_template: BatchRunTemplate { max_steps: 60, capture: CaptureConfig::final_only() },
+        run_template: BatchRunTemplate {
+            max_steps: 60,
+            aggregation: AggregationConfig::final_only(),
+        },
     };
 
     let batch_report =

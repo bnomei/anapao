@@ -147,8 +147,9 @@ pub use events::{EventSink, VecEventSink};
 pub use plan::CompiledScenario;
 pub use simulator::Simulator;
 pub use types::{
-    BatchConfig, BatchReport, BatchRunTemplate, CaptureConfig, CaptureSchedule, EndConditionSpec,
-    ExecutionMode, MetricKey, RunConfig, RunReport, ScenarioSpec, Selection, TransferSpec,
+    AggregationConfig, BatchConfig, BatchReport, BatchRunTemplate, CaptureConfig, CaptureSchedule,
+    EndConditionSpec, ExecutionMode, MetricKey, RunConfig, RunReport, ScenarioSpec, Selection,
+    TransferSpec,
 };
 
 #[cfg(doctest)]

@@ -39,9 +39,14 @@ proptest = { version = "1.11.0", optional = true }
 
 [dev-dependencies]
 criterion = { version = "5.0.1", package = "codspeed-criterion-compat" }
+dhat = "0.3.3"
 rstest = "0.26.1"
 tempfile = "3.27.0"
 
 [[bench]]
 name = "simulation"
+harness = false
+
+[[bench]]
+name = "capture_memory"
 harness = false

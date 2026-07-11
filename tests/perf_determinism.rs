@@ -2,10 +2,10 @@ use std::collections::{BTreeMap, HashSet};
 
 use anapao::rng::derive_run_seed;
 use anapao::types::{
-    ActionMode, BatchConfig, BatchRunTemplate, CaptureConfig, DelayNodeConfig, EdgeId, EdgeSpec,
-    EndConditionSpec, ExecutionMode, MetricKey, NodeConfig, NodeId, NodeKind, NodeModeConfig,
-    NodeSpec, QueueNodeConfig, RunConfig, ScenarioId, ScenarioSpec, TransferSpec, TriggerMode,
-    VariableRuntimeConfig, VariableSourceSpec, VariableUpdateTiming,
+    ActionMode, AggregationConfig, BatchConfig, BatchRunTemplate, CaptureConfig, DelayNodeConfig,
+    EdgeId, EdgeSpec, EndConditionSpec, ExecutionMode, MetricKey, NodeConfig, NodeId, NodeKind,
+    NodeModeConfig, NodeSpec, QueueNodeConfig, RunConfig, ScenarioId, ScenarioSpec, TransferSpec,
+    TriggerMode, VariableRuntimeConfig, VariableSourceSpec, VariableUpdateTiming,
 };
 use anapao::{CompiledScenario, Simulator};
 
@@ -253,7 +253,7 @@ fn perf_determinism_batch_replay_stress_guardrails() {
         runs: 192,
         base_seed: 0xD1FF_EE11_u64,
         execution_mode: ExecutionMode::SingleThread,
-        run_template: BatchRunTemplate { max_steps: 64, capture: CaptureConfig::default() },
+        run_template: BatchRunTemplate { max_steps: 64, aggregation: AggregationConfig::default() },
     };
 
     let report_a = Simulator::run_batch(&compiled, &config).expect("batch run should succeed");
@@ -302,7 +302,7 @@ fn perf_determinism_batch_parallel_matches_sequential_stress() {
         runs: 160,
         base_seed: 0x1A2B_3C4D_u64,
         execution_mode: ExecutionMode::SingleThread,
-        run_template: BatchRunTemplate { max_steps: 64, capture: CaptureConfig::default() },
+        run_template: BatchRunTemplate { max_steps: 64, aggregation: AggregationConfig::default() },
     };
     let parallel = BatchConfig { execution_mode: ExecutionMode::Rayon, ..sequential.clone() };
 
@@ -324,7 +324,7 @@ fn perf_determinism_batch_parallel_request_falls_back_deterministically() {
         runs: 48,
         base_seed: 0x7777_u64,
         execution_mode: ExecutionMode::Rayon,
-        run_template: BatchRunTemplate { max_steps: 64, capture: CaptureConfig::default() },
+        run_template: BatchRunTemplate { max_steps: 64, aggregation: AggregationConfig::default() },
     };
 
     let report = Simulator::run_batch(&compiled, &config).expect("batch run should succeed");

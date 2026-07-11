@@ -13,9 +13,9 @@ use serde::Deserialize;
 
 use crate::error::SetupError;
 use crate::types::{
-    BatchConfig, BatchRunTemplate, CaptureConfig, EdgeId, EdgeSpec, EndConditionSpec,
-    ExecutionMode, MetricKey, NodeId, NodeKind, NodeSpec, RunConfig, ScenarioId, ScenarioSpec,
-    TransferSpec,
+    AggregationConfig, BatchConfig, BatchRunTemplate, CaptureConfig, EdgeId, EdgeSpec,
+    EndConditionSpec, ExecutionMode, MetricKey, NodeId, NodeKind, NodeSpec, RunConfig, ScenarioId,
+    ScenarioSpec, TransferSpec,
 };
 use crate::{CompiledScenario, Simulator};
 
@@ -115,7 +115,7 @@ pub fn fixture_batch_config(
         execution_mode,
         run_template: BatchRunTemplate {
             max_steps: FIXTURE_RUN_MAX_STEPS,
-            capture: CaptureConfig::default(),
+            aggregation: AggregationConfig::default(),
         },
     }
 }
@@ -268,7 +268,7 @@ mod tests {
         FIXTURE_BATCH_BASE_SEED, FIXTURE_BATCH_RUNS, FIXTURE_RUN_MAX_STEPS, FIXTURE_RUN_SEED,
     };
     use crate::error::SetupError;
-    use crate::types::{ExecutionMode, MetricKey};
+    use crate::types::{AggregationConfig, ExecutionMode, MetricKey};
 
     #[test]
     fn deterministic_config_fixtures_use_documented_defaults() {
@@ -289,7 +289,7 @@ mod tests {
         assert_eq!(batch.base_seed, FIXTURE_BATCH_BASE_SEED);
         assert_eq!(batch.execution_mode, ExecutionMode::SingleThread);
         assert_eq!(batch.run_template.max_steps, run.max_steps);
-        assert_eq!(batch.run_template.capture, run.capture);
+        assert_eq!(batch.run_template.aggregation, AggregationConfig::default());
     }
 
     #[test]

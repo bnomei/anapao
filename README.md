@@ -139,6 +139,19 @@ What you learned:
 - seeds pin determinism,
 - capture configuration controls trace granularity.
 
+Batch aggregation is separate from per-run diagnostic capture. Configure only the
+metric schedule and selection that belong in the `BatchReport`:
+
+```rust
+use anapao::types::{AggregationConfig, BatchConfig, CaptureSchedule, ExecutionMode};
+
+let batch = BatchConfig::for_runs(64)
+    .with_execution_mode(ExecutionMode::SingleThread)
+    .with_aggregation(AggregationConfig::default().with_schedule(CaptureSchedule::Final));
+
+assert!(matches!(batch.run_template.aggregation.schedule(), CaptureSchedule::Final));
+```
+
 ---
 
 ## Step 4: Execute a Deterministic Single Run

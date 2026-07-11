@@ -3,8 +3,8 @@ use std::collections::BTreeSet;
 use anapao::error::RunError;
 use anapao::events::VecEventSink;
 use anapao::types::{
-    CaptureConfig, CaptureSchedule, EdgeId, EndConditionSpec, MetricKey, NodeId, RunConfig,
-    ScenarioSpec, Selection, TransferSpec,
+    AggregationConfig, BatchRunTemplate, CaptureConfig, CaptureSchedule, EdgeId, EndConditionSpec,
+    MetricKey, NodeId, RunConfig, ScenarioSpec, Selection, TransferSpec,
 };
 use anapao::Simulator;
 
@@ -128,6 +128,58 @@ fn capture_wire_rejects_unknown_nested_schedule_and_selection_fields() {
         "transfers": {"kind":"all"}
     }"#;
     assert!(serde_json::from_str::<CaptureConfig>(only_with_unknown_field).is_err());
+}
+
+#[test]
+fn batch_aggregation_uses_a_canonical_wire_and_reads_legacy_capture() {
+    let legacy = r#"{
+        "max_steps": 12,
+        "capture": {
+            "capture_nodes": ["sink"],
+            "capture_metrics": ["sink"],
+            "every_n_steps": 3,
+            "include_step_zero": false,
+            "include_final_state": true
+        }
+    }"#;
+    let template: BatchRunTemplate = serde_json::from_str(legacy).expect("legacy template decodes");
+    assert_eq!(template.max_steps, 12);
+    assert!(matches!(
+        template.aggregation.schedule(),
+        CaptureSchedule::Every { stride, include_initial: false, include_final: true }
+            if stride.get() == 3
+    ));
+    assert_eq!(
+        template.aggregation.metrics().only(),
+        Some(&BTreeSet::from([MetricKey::fixture("sink")]))
+    );
+
+    let output = serde_json::to_value(&template).expect("canonical template encodes");
+    assert!(output.get("capture").is_none());
+    assert_eq!(output["aggregation"]["metrics"]["kind"], "only");
+
+    let current = BatchRunTemplate::default().with_aggregation(AggregationConfig::none());
+    let canonical = serde_json::to_value(&current).expect("current template encodes");
+    assert_eq!(canonical["aggregation"]["schedule"]["kind"], "none");
+}
+
+#[test]
+fn batch_aggregation_rejects_unknown_or_empty_metric_selection() {
+    let empty_only = r#"{
+        "max_steps": 12,
+        "aggregation": {
+            "schedule": {"kind":"none"},
+            "metrics": {"kind":"only","items":[]}
+        }
+    }"#;
+    assert!(serde_json::from_str::<BatchRunTemplate>(empty_only).is_err());
+
+    let mixed = r#"{
+        "max_steps": 12,
+        "aggregation": {"schedule":{"kind":"none"},"metrics":{"kind":"none"}},
+        "capture": {"capture_nodes":[],"capture_metrics":[],"every_n_steps":1,"include_step_zero":true,"include_final_state":true}
+    }"#;
+    assert!(serde_json::from_str::<BatchRunTemplate>(mixed).is_err());
 }
 
 #[test]

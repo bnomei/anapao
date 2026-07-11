@@ -232,6 +232,74 @@ fn selection_is_empty<T>(selection: &Selection<T>) -> bool {
     matches!(selection, Selection::Only(values) if values.is_empty())
 }
 
+/// Retention policy for batch aggregation output.
+///
+/// Batch aggregation is intentionally narrower than per-run diagnostics: it
+/// controls only the metric series that become observable on a [`BatchReport`].
+/// Node snapshots, variables, and transfer records have never had a batch
+/// report destination and therefore are not configurable here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AggregationConfig {
+    schedule: CaptureSchedule,
+    metrics: Selection<MetricKey>,
+}
+
+impl Default for AggregationConfig {
+    fn default() -> Self {
+        Self { schedule: CaptureConfig::default().schedule, metrics: Selection::All }
+    }
+}
+
+impl AggregationConfig {
+    /// Suppresses aggregate metric series.
+    #[must_use]
+    pub fn none() -> Self {
+        Self { schedule: CaptureSchedule::None, metrics: Selection::None }
+    }
+
+    /// Retains only terminal aggregate metric points.
+    #[must_use]
+    pub fn final_only() -> Self {
+        Self { schedule: CaptureSchedule::Final, metrics: Selection::All }
+    }
+
+    /// Returns the aggregate metric sampling schedule.
+    pub fn schedule(&self) -> &CaptureSchedule {
+        &self.schedule
+    }
+
+    /// Returns the aggregate metric selection.
+    pub fn metrics(&self) -> &Selection<MetricKey> {
+        &self.metrics
+    }
+
+    /// Replaces the aggregate metric sampling schedule.
+    #[must_use]
+    pub fn with_schedule(mut self, schedule: CaptureSchedule) -> Self {
+        self.schedule = schedule;
+        self
+    }
+
+    /// Replaces the aggregate metric selection.
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: Selection<MetricKey>) -> Self {
+        self.metrics = metrics;
+        self
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), &'static str> {
+        if selection_is_empty(&self.metrics) {
+            return Err("Only selections must not be empty");
+        }
+        Ok(())
+    }
+
+    fn from_capture(capture: CaptureConfig) -> Self {
+        Self { schedule: capture.schedule, metrics: capture.metrics }
+    }
+}
+
 #[derive(Serialize)]
 struct CurrentCaptureConfigWire<'a> {
     schedule: &'a CaptureSchedule,
@@ -372,15 +440,15 @@ impl RunConfig {
 }
 
 /// Seed-agnostic run template used by batch execution.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BatchRunTemplate {
     pub max_steps: u64,
-    pub capture: CaptureConfig,
+    pub aggregation: AggregationConfig,
 }
 
 impl Default for BatchRunTemplate {
     fn default() -> Self {
-        Self { max_steps: 100, capture: CaptureConfig::default() }
+        Self { max_steps: 100, aggregation: AggregationConfig::default() }
     }
 }
 
@@ -392,15 +460,89 @@ impl BatchRunTemplate {
     }
 
     #[must_use]
-    pub fn with_capture(mut self, capture: CaptureConfig) -> Self {
-        self.capture = capture;
+    pub fn with_aggregation(mut self, aggregation: AggregationConfig) -> Self {
+        self.aggregation = aggregation;
         self
+    }
+
+    /// Compatibility adapter for the 0.2 transition.
+    ///
+    /// Only the legacy capture schedule and metric selection map to batch
+    /// aggregation. Node, variable, and transfer capture settings never had a
+    /// corresponding [`BatchReport`] destination.
+    #[deprecated(since = "0.2.0", note = "use BatchRunTemplate::with_aggregation()")]
+    #[must_use]
+    pub fn with_capture(self, capture: CaptureConfig) -> Self {
+        self.with_aggregation(AggregationConfig::from_capture(capture))
     }
 
     /// Builds a concrete run config for one derived seed.
     #[must_use]
     pub fn to_run_config(&self, seed: u64) -> RunConfig {
-        RunConfig { seed, max_steps: self.max_steps, capture: self.capture.clone() }
+        // T002 sequencing adapter: batch still executes the legacy full-report
+        // path until T003 replaces it with compact per-run state. Start from the
+        // full default capture policy so transfer retention remains `All`, then
+        // replace only the aggregation-backed schedule and metric selection.
+        let capture = CaptureConfig::default()
+            .with_schedule(self.aggregation.schedule.clone())
+            .with_metrics(self.aggregation.metrics.clone());
+        RunConfig { seed, max_steps: self.max_steps, capture }
+    }
+}
+
+#[derive(Serialize)]
+struct CurrentBatchRunTemplateWire<'a> {
+    max_steps: u64,
+    aggregation: &'a AggregationConfig,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CurrentBatchRunTemplateWireOwned {
+    max_steps: u64,
+    aggregation: AggregationConfig,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyBatchRunTemplateWire {
+    max_steps: u64,
+    capture: CaptureConfig,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum BatchRunTemplateWire {
+    Current(CurrentBatchRunTemplateWireOwned),
+    Legacy(LegacyBatchRunTemplateWire),
+}
+
+impl Serialize for BatchRunTemplate {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        CurrentBatchRunTemplateWire { max_steps: self.max_steps, aggregation: &self.aggregation }
+            .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for BatchRunTemplate {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let template = match BatchRunTemplateWire::deserialize(deserializer)? {
+            BatchRunTemplateWire::Current(CurrentBatchRunTemplateWireOwned {
+                max_steps,
+                aggregation,
+            }) => Self { max_steps, aggregation },
+            BatchRunTemplateWire::Legacy(LegacyBatchRunTemplateWire { max_steps, capture }) => {
+                Self { max_steps, aggregation: AggregationConfig::from_capture(capture) }
+            }
+        };
+        template.aggregation.validate().map_err(serde::de::Error::custom)?;
+        Ok(template)
     }
 }
 
@@ -454,9 +596,20 @@ impl BatchConfig {
         self
     }
 
+    /// Replaces the batch aggregation policy.
     #[must_use]
-    pub fn with_capture(mut self, capture: CaptureConfig) -> Self {
-        self.run_template.capture = capture;
+    pub fn with_aggregation(mut self, aggregation: AggregationConfig) -> Self {
+        self.run_template.aggregation = aggregation;
         self
+    }
+
+    /// Compatibility adapter for the 0.2 transition.
+    ///
+    /// Only the supplied capture schedule and metric selection apply to batch
+    /// aggregation; node, variable, and transfer settings are ignored.
+    #[deprecated(since = "0.2.0", note = "use BatchConfig::with_aggregation()")]
+    #[must_use]
+    pub fn with_capture(self, capture: CaptureConfig) -> Self {
+        self.with_aggregation(AggregationConfig::from_capture(capture))
     }
 }

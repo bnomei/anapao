@@ -6,7 +6,7 @@
 // This file is part of Anapao and is proprietary software.
 // Unauthorized copying, modification, or distribution is prohibited.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::hint::black_box;
 use std::path::{Path, PathBuf};
@@ -17,12 +17,12 @@ use anapao::events::VecEventSink;
 use anapao::simulator::Simulator;
 use anapao::testkit::{deterministic_batch_config, deterministic_run_config, fixture_scenario};
 use anapao::types::{
-    ActionMode, BatchConfig, BatchReport, BatchRunTemplate, CaptureConfig, ConnectionKind,
-    DelayNodeConfig, EdgeConnectionConfig, EdgeId, EdgeSpec, EndConditionSpec, ExecutionMode,
-    ManifestRef, MetricKey, NodeConfig, NodeId, NodeKind, NodeModeConfig, NodeSpec, PoolNodeConfig,
-    QueueNodeConfig, RunConfig, RunReport, ScenarioId, ScenarioSpec, SortingGateNodeConfig,
-    StateConnectionConfig, StateConnectionRole, StateConnectionTarget, TransferSpec, TriggerMode,
-    VariableRuntimeConfig, VariableSourceSpec, VariableUpdateTiming,
+    ActionMode, AggregationConfig, BatchConfig, BatchReport, BatchRunTemplate, CaptureConfig,
+    ConnectionKind, DelayNodeConfig, EdgeConnectionConfig, EdgeId, EdgeSpec, EndConditionSpec,
+    ExecutionMode, ManifestRef, MetricKey, NodeConfig, NodeId, NodeKind, NodeModeConfig, NodeSpec,
+    PoolNodeConfig, QueueNodeConfig, RunConfig, RunReport, ScenarioId, ScenarioSpec, Selection,
+    SortingGateNodeConfig, StateConnectionConfig, StateConnectionRole, StateConnectionTarget,
+    TransferSpec, TriggerMode, VariableRuntimeConfig, VariableSourceSpec, VariableUpdateTiming,
 };
 use anapao::CompiledScenario;
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion, Throughput};
@@ -398,6 +398,32 @@ fn benches_simulation_guardrails(c: &mut Criterion) {
         })
     });
 
+    let compiled_capture_policy =
+        Simulator::compile(fixture_scenario()).expect("compile capture policy fixture");
+    let capture_policy_configs = [
+        ("full", CaptureConfig::default()),
+        ("none", CaptureConfig::none()),
+        ("final", CaptureConfig::final_only()),
+        (
+            "selective",
+            CaptureConfig::default()
+                .with_metrics(Selection::Only(BTreeSet::from([MetricKey::fixture("sink")]))),
+        ),
+    ];
+    for (case_id, capture) in capture_policy_configs {
+        let compiled_capture_policy = compiled_capture_policy.clone();
+        let config =
+            RunConfig::for_seed(0x000A_11CE_55ED_u64).with_max_steps(64).with_capture(capture);
+        group.bench_function(format!("single_run_capture_{case_id}"), move |b| {
+            b.iter(|| {
+                let report =
+                    Simulator::run(black_box(&compiled_capture_policy), black_box(&config))
+                        .expect("single run capture policy");
+                black_box(checksum_run_report(&report))
+            })
+        });
+    }
+
     let expanded_compiled_single = Simulator::compile(expanded_semantics_scenario())
         .expect("compile expanded scenario fixture");
     let expanded_run_config =
@@ -424,13 +450,47 @@ fn benches_simulation_guardrails(c: &mut Criterion) {
         })
     });
 
+    let compiled_aggregation_all =
+        Simulator::compile(fixture_scenario()).expect("compile aggregation fixture");
+    let aggregation_all = BatchConfig::for_runs(256)
+        .with_base_seed(0x000A_11CE_55ED_u64)
+        .with_max_steps(256)
+        .with_aggregation(AggregationConfig::default());
+    group.bench_function("batch_aggregation_all_single_thread", move |b| {
+        b.iter(|| {
+            let report = Simulator::run_batch(
+                black_box(&compiled_aggregation_all),
+                black_box(&aggregation_all),
+            )
+            .expect("batch aggregation all");
+            black_box(checksum_batch_report(&report))
+        })
+    });
+
+    let compiled_aggregation_none =
+        Simulator::compile(fixture_scenario()).expect("compile aggregation fixture");
+    let aggregation_none = BatchConfig::for_runs(256)
+        .with_base_seed(0x000A_11CE_55ED_u64)
+        .with_max_steps(256)
+        .with_aggregation(AggregationConfig::none());
+    group.bench_function("batch_aggregation_none_single_thread", move |b| {
+        b.iter(|| {
+            let report = Simulator::run_batch(
+                black_box(&compiled_aggregation_none),
+                black_box(&aggregation_none),
+            )
+            .expect("batch aggregation none");
+            black_box(checksum_batch_report(&report))
+        })
+    });
+
     let expanded_compiled_batch = Simulator::compile(expanded_semantics_scenario())
         .expect("compile expanded scenario fixture");
     let expanded_batch_config = BatchConfig {
         runs: 96,
         base_seed: 0xD1FF_EE11_u64,
         execution_mode: ExecutionMode::SingleThread,
-        run_template: BatchRunTemplate { max_steps: 64, capture: CaptureConfig::default() },
+        run_template: BatchRunTemplate { max_steps: 64, aggregation: AggregationConfig::default() },
     };
     group.throughput(Throughput::Elements(expanded_batch_config.runs));
     group.bench_function("batch_run_expanded_semantics", move |b| {
@@ -446,13 +506,52 @@ fn benches_simulation_guardrails(c: &mut Criterion) {
 
     #[cfg(feature = "parallel")]
     {
+        let compiled_aggregation_all_rayon =
+            Simulator::compile(fixture_scenario()).expect("compile aggregation fixture");
+        let aggregation_all_rayon = BatchConfig::for_runs(256)
+            .with_base_seed(0x000A_11CE_55ED_u64)
+            .with_max_steps(256)
+            .with_execution_mode(ExecutionMode::Rayon)
+            .with_aggregation(AggregationConfig::default());
+        group.bench_function("batch_aggregation_all_rayon", move |b| {
+            b.iter(|| {
+                let report = Simulator::run_batch(
+                    black_box(&compiled_aggregation_all_rayon),
+                    black_box(&aggregation_all_rayon),
+                )
+                .expect("batch aggregation all rayon");
+                black_box(checksum_batch_report(&report))
+            })
+        });
+
+        let compiled_aggregation_none_rayon =
+            Simulator::compile(fixture_scenario()).expect("compile aggregation fixture");
+        let aggregation_none_rayon = BatchConfig::for_runs(256)
+            .with_base_seed(0x000A_11CE_55ED_u64)
+            .with_max_steps(256)
+            .with_execution_mode(ExecutionMode::Rayon)
+            .with_aggregation(AggregationConfig::none());
+        group.bench_function("batch_aggregation_none_rayon", move |b| {
+            b.iter(|| {
+                let report = Simulator::run_batch(
+                    black_box(&compiled_aggregation_none_rayon),
+                    black_box(&aggregation_none_rayon),
+                )
+                .expect("batch aggregation none rayon");
+                black_box(checksum_batch_report(&report))
+            })
+        });
+
         let expanded_compiled_batch_rayon = Simulator::compile(expanded_semantics_scenario())
             .expect("compile expanded scenario fixture");
         let expanded_batch_config_rayon = BatchConfig {
             runs: 96,
             base_seed: 0xD1FF_EE11_u64,
             execution_mode: ExecutionMode::Rayon,
-            run_template: BatchRunTemplate { max_steps: 64, capture: CaptureConfig::default() },
+            run_template: BatchRunTemplate {
+                max_steps: 64,
+                aggregation: AggregationConfig::default(),
+            },
         };
         group.throughput(Throughput::Elements(expanded_batch_config_rayon.runs));
         group.bench_function("batch_run_expanded_semantics_rayon", move |b| {
@@ -577,7 +676,10 @@ fn benches_simulation_hotspots(c: &mut Criterion) {
         runs: 24,
         base_seed: 0xA0A0_4242_u64,
         execution_mode: ExecutionMode::SingleThread,
-        run_template: BatchRunTemplate { max_steps: 48, capture: CaptureConfig::final_only() },
+        run_template: BatchRunTemplate {
+            max_steps: 48,
+            aggregation: AggregationConfig::final_only(),
+        },
     };
     group.throughput(Throughput::Elements(batch_expression_config.runs));
     group.bench_function("batch_run_expression_fanout", move |b| {
@@ -599,7 +701,10 @@ fn benches_simulation_hotspots(c: &mut Criterion) {
             runs: 24,
             base_seed: 0xA0A0_4242_u64,
             execution_mode: ExecutionMode::Rayon,
-            run_template: BatchRunTemplate { max_steps: 48, capture: CaptureConfig::final_only() },
+            run_template: BatchRunTemplate {
+                max_steps: 48,
+                aggregation: AggregationConfig::final_only(),
+            },
         };
         group.throughput(Throughput::Elements(batch_expression_config_rayon.runs));
         group.bench_function("batch_run_expression_fanout_rayon", move |b| {

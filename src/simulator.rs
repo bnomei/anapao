@@ -310,8 +310,8 @@ mod tests {
     };
     use crate::types::MetricKey;
     use crate::types::{
-        BatchConfig, BatchRunTemplate, CaptureConfig, EndConditionSpec, ExecutionMode, NodeId,
-        RunConfig,
+        AggregationConfig, BatchConfig, BatchRunTemplate, CaptureConfig, EndConditionSpec,
+        ExecutionMode, NodeId, RunConfig,
     };
     use crate::validation::compile_scenario;
 
@@ -581,7 +581,10 @@ mod tests {
             runs: 2,
             base_seed: 1,
             execution_mode: ExecutionMode::SingleThread,
-            run_template: BatchRunTemplate { max_steps: 0, capture: CaptureConfig::default() },
+            run_template: BatchRunTemplate {
+                max_steps: 0,
+                aggregation: AggregationConfig::default(),
+            },
         };
         let batch_error = Simulator::run_batch(&compiled, &invalid_batch).expect_err("must fail");
         assert!(matches!(

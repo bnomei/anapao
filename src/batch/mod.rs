@@ -153,8 +153,9 @@ mod tests {
 
     use crate::rng::derive_run_seed;
     use crate::types::{
-        BatchConfig, BatchRunTemplate, CaptureConfig, EdgeSpec, EndConditionSpec, ExecutionMode,
-        MetricKey, NodeId, NodeKind, NodeSpec, ScenarioId, ScenarioSpec, TransferSpec,
+        AggregationConfig, BatchConfig, BatchRunTemplate, EdgeSpec, EndConditionSpec,
+        ExecutionMode, MetricKey, NodeId, NodeKind, NodeSpec, ScenarioId, ScenarioSpec,
+        TransferSpec,
     };
     use crate::validation::compile_scenario;
 
@@ -298,7 +299,10 @@ mod tests {
             runs,
             base_seed,
             execution_mode,
-            run_template: BatchRunTemplate { max_steps: 10, capture: CaptureConfig::default() },
+            run_template: BatchRunTemplate {
+                max_steps: 10,
+                aggregation: AggregationConfig::default(),
+            },
         }
     }
 

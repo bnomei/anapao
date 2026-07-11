@@ -156,8 +156,8 @@ fn validate_batch_run_template_with_prefix(
         });
     }
 
-    template.capture.validate().map_err(|reason| SetupError::InvalidParameter {
-        name: format!("{prefix}.capture"),
+    template.aggregation.validate().map_err(|reason| SetupError::InvalidParameter {
+        name: format!("{prefix}.aggregation"),
         reason: reason.to_string(),
     })?;
 
@@ -859,10 +859,11 @@ fn validate_queue_constraints(node_id: &NodeId, node: &NodeSpec) -> Result<(), S
 mod tests {
     use crate::error::SetupError;
     use crate::types::{
-        BatchConfig, BatchRunTemplate, CaptureConfig, ConnectionKind, DelayNodeConfig,
-        EdgeConnectionConfig, EdgeSpec, EndConditionSpec, ExecutionMode, MetricKey, NodeConfig,
-        NodeKind, NodeSpec, PoolNodeConfig, QueueNodeConfig, RunConfig, ScenarioId, ScenarioSpec,
-        StateConnectionConfig, StateConnectionRole, StateConnectionTarget, TransferSpec,
+        AggregationConfig, BatchConfig, BatchRunTemplate, CaptureConfig, ConnectionKind,
+        DelayNodeConfig, EdgeConnectionConfig, EdgeSpec, EndConditionSpec, ExecutionMode,
+        MetricKey, NodeConfig, NodeKind, NodeSpec, PoolNodeConfig, QueueNodeConfig, RunConfig,
+        ScenarioId, ScenarioSpec, StateConnectionConfig, StateConnectionRole,
+        StateConnectionTarget, TransferSpec,
     };
 
     use super::{compile_scenario, validate_batch_config, validate_run_config};
@@ -2268,7 +2269,10 @@ mod tests {
             runs: 10,
             base_seed: 1,
             execution_mode: ExecutionMode::Rayon,
-            run_template: BatchRunTemplate { max_steps: 0, capture: CaptureConfig::default() },
+            run_template: BatchRunTemplate {
+                max_steps: 0,
+                aggregation: AggregationConfig::default(),
+            },
         };
 
         let error = validate_batch_config(&config).expect_err("invalid nested run must fail");

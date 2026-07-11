@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use anapao::types::{
-    BatchConfig, BatchRunTemplate, CaptureConfig, EdgeId, EdgeSpec, EndConditionSpec,
+    AggregationConfig, BatchConfig, BatchRunTemplate, EdgeId, EdgeSpec, EndConditionSpec,
     ExecutionMode, NodeId, NodeKind, NodeSpec, ScenarioId, ScenarioSpec, TransferSpec,
     VariableRuntimeConfig, VariableSourceSpec, VariableUpdateTiming,
 };
@@ -52,7 +52,7 @@ fn batch_report_explicitly_retains_non_completed_run_summaries() {
         runs: 128,
         base_seed: 0x0D15_EA5E_u64,
         execution_mode: ExecutionMode::SingleThread,
-        run_template: BatchRunTemplate { max_steps: 3, capture: CaptureConfig::default() },
+        run_template: BatchRunTemplate { max_steps: 3, aggregation: AggregationConfig::default() },
     };
 
     let report = Simulator::run_batch(&compiled, &config).expect("batch run should succeed");
@@ -82,7 +82,7 @@ fn batch_rayon_sink_push_failure_maps_to_event_sink_error() {
         runs: 8,
         base_seed: 0xACED_u64,
         execution_mode: ExecutionMode::Rayon,
-        run_template: BatchRunTemplate { max_steps: 10, capture: CaptureConfig::default() },
+        run_template: BatchRunTemplate { max_steps: 10, aggregation: AggregationConfig::default() },
     };
 
     let mut sink = FailAfterPushesSink::new(0);
