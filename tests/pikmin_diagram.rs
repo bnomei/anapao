@@ -22,7 +22,7 @@ fn pikmin_scenario_from_profile(profile: PikminFixtureProfile) -> anapao::types:
 fn pikmin_diagram_bad_ending_hits_day_limit_first() {
     let scenario = pikmin_scenario_from_profile(PikminFixtureProfile::BadEndingBiased);
     let compiled = Simulator::compile(scenario).expect("pikmin diagram scenario should compile");
-    let config = RunConfig { seed: 2026, max_steps: 60, capture: CaptureConfig::disabled() };
+    let config = RunConfig { seed: 2026, max_steps: 60, capture: CaptureConfig::final_only() };
 
     let report = Simulator::run(&compiled, &config).expect("run should succeed");
     let days_spent = days_spent_node_id();
@@ -41,7 +41,7 @@ fn pikmin_diagram_bad_ending_hits_day_limit_first() {
 fn pikmin_diagram_good_ending_reaches_ship_parts_before_day_limit() {
     let scenario = pikmin_scenario_from_profile(PikminFixtureProfile::GoodEndingBiased);
     let compiled = Simulator::compile(scenario).expect("pikmin diagram scenario should compile");
-    let config = RunConfig { seed: 2026, max_steps: 60, capture: CaptureConfig::disabled() };
+    let config = RunConfig { seed: 2026, max_steps: 60, capture: CaptureConfig::final_only() };
 
     let report = Simulator::run(&compiled, &config).expect("run should succeed");
     let days_spent = days_spent_node_id();
@@ -66,7 +66,7 @@ fn pikmin_diagram_is_reproducible_for_fixed_seed() {
     let tuning = PikminFixtureTuning::new(4, 2, 40.0).expect("valid custom tuning");
     let scenario = pikmin_scenario(tuning).expect("pikmin scenario should build");
     let compiled = Simulator::compile(scenario).expect("pikmin diagram scenario should compile");
-    let config = RunConfig { seed: 777, max_steps: 60, capture: CaptureConfig::disabled() };
+    let config = RunConfig { seed: 777, max_steps: 60, capture: CaptureConfig::final_only() };
 
     let report_a = Simulator::run(&compiled, &config).expect("first run should work");
     let report_b = Simulator::run(&compiled, &config).expect("second run should work");
@@ -84,7 +84,7 @@ fn pikmin_diagram_batch_probability_band_for_good_ending_threshold() {
         runs: 256,
         base_seed: 0x5050,
         execution_mode: ExecutionMode::SingleThread,
-        run_template: BatchRunTemplate { max_steps: 60, capture: CaptureConfig::disabled() },
+        run_template: BatchRunTemplate { max_steps: 60, capture: CaptureConfig::final_only() },
     };
     let expectations = vec![Expectation::ProbabilityBand {
         metric: ship_parts_metric_key(),
@@ -113,7 +113,7 @@ fn pikmin_diagram_balance_guardrails_from_prediction_indicators() {
         runs: 256,
         base_seed: 0x6060,
         execution_mode: ExecutionMode::SingleThread,
-        run_template: BatchRunTemplate { max_steps: 60, capture: CaptureConfig::disabled() },
+        run_template: BatchRunTemplate { max_steps: 60, capture: CaptureConfig::final_only() },
     };
 
     let batch_report =

@@ -117,18 +117,22 @@ scenario.try_into()?;`. Read inspection data through `scenario_id()`, `source_sp
 ### Snippet S03 — Create a Deterministic RunConfig
 
 ```rust
-use anapao::types::{CaptureConfig, RunConfig};
+use anapao::types::{CaptureConfig, CaptureSchedule, RunConfig};
 
-let run = RunConfig::for_seed(42).with_max_steps(250).with_capture(CaptureConfig {
-    every_n_steps: 5,
-    include_step_zero: true,
-    include_final_state: true,
-    ..CaptureConfig::default()
-});
+let run = RunConfig::for_seed(42).with_max_steps(250).with_capture(
+    CaptureConfig::default().with_schedule(CaptureSchedule::Every {
+        stride: std::num::NonZeroU64::new(5).expect("positive stride"),
+        include_initial: true,
+        include_final: true,
+    }),
+);
 
 assert_eq!(run.seed, 42);
 assert_eq!(run.max_steps, 250);
-assert_eq!(run.capture.every_n_steps, 5);
+assert!(matches!(
+    run.capture.schedule(),
+    CaptureSchedule::Every { stride, .. } if stride.get() == 5
+));
 ```
 
 What you learned:
@@ -381,7 +385,7 @@ What you learned:
   - fix: pin `RunConfig.seed` for single runs and keep batch `base_seed` stable (batch seeds derive from `base_seed` + run index).
 - Sparse traces:
   - symptom: insufficient snapshots for diagnostics.
-  - fix: adjust `RunConfig.capture` (`every_n_steps`, step-zero/final flags).
+  - fix: adjust `RunConfig.capture` with `CaptureSchedule::Every`.
 
 ## Feature Flags
 

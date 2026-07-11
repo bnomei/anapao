@@ -6,7 +6,7 @@
 pub use crate::assertions::{AssertionReport, Expectation, MetricSelector};
 pub use crate::events::{EventSink, VecEventSink};
 pub use crate::types::{
-    BatchConfig, BatchReport, BatchRunTemplate, CaptureConfig, EndConditionSpec, ExecutionMode,
-    MetricKey, RunConfig, RunReport, ScenarioSpec, TransferSpec,
+    BatchConfig, BatchReport, BatchRunTemplate, CaptureConfig, CaptureSchedule, EndConditionSpec,
+    ExecutionMode, MetricKey, RunConfig, RunReport, ScenarioSpec, Selection, TransferSpec,
 };
 pub use crate::{CompiledScenario, Simulator};

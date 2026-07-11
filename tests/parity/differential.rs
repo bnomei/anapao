@@ -852,7 +852,7 @@ fn compile_variable_case_scenario(expression: &str, case: &ParityFixtureCase) ->
 }
 
 fn run_config(seed: u64, max_steps: u64) -> RunConfig {
-    RunConfig { seed, max_steps, capture: CaptureConfig::disabled() }
+    RunConfig { seed, max_steps, capture: CaptureConfig::final_only() }
 }
 
 fn compile_ok(case: &ParityFixtureCase, scenario: &ScenarioSpec, detail: &str) -> CompiledScenario {

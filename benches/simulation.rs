@@ -516,7 +516,7 @@ fn benches_simulation_hotspots(c: &mut Criterion) {
     let expression_compiled =
         Simulator::compile(expression_fanout_scenario()).expect("compile expression scenario");
     let expression_run_config =
-        RunConfig { seed: 0xC0DE_4510_u64, max_steps: 64, capture: CaptureConfig::disabled() };
+        RunConfig { seed: 0xC0DE_4510_u64, max_steps: 64, capture: CaptureConfig::final_only() };
     group.throughput(Throughput::Elements(expression_run_config.max_steps));
     group.bench_function("single_run_expression_fanout", move |b| {
         b.iter(|| {
@@ -530,7 +530,7 @@ fn benches_simulation_hotspots(c: &mut Criterion) {
     let expression_events_compiled =
         Simulator::compile(expression_fanout_scenario()).expect("compile expression scenario");
     let expression_events_run_config =
-        RunConfig { seed: 0xC0DE_4510_u64, max_steps: 64, capture: CaptureConfig::disabled() };
+        RunConfig { seed: 0xC0DE_4510_u64, max_steps: 64, capture: CaptureConfig::final_only() };
     group.bench_function("single_run_expression_fanout_with_events", move |b| {
         b.iter(|| {
             let mut sink = VecEventSink::new();
@@ -548,7 +548,7 @@ fn benches_simulation_hotspots(c: &mut Criterion) {
     let gate_compiled =
         Simulator::compile(sorting_gate_routing_scenario()).expect("compile gate scenario");
     let gate_run_config =
-        RunConfig { seed: 0xBEE5_0001_u64, max_steps: 48, capture: CaptureConfig::disabled() };
+        RunConfig { seed: 0xBEE5_0001_u64, max_steps: 48, capture: CaptureConfig::final_only() };
     group.throughput(Throughput::Elements(gate_run_config.max_steps));
     group.bench_function("single_run_sorting_gate_routing", move |b| {
         b.iter(|| {
@@ -561,7 +561,7 @@ fn benches_simulation_hotspots(c: &mut Criterion) {
     let state_compiled =
         Simulator::compile(state_modifier_stress_scenario()).expect("compile state scenario");
     let state_run_config =
-        RunConfig { seed: 0x5A7E_0001_u64, max_steps: 48, capture: CaptureConfig::disabled() };
+        RunConfig { seed: 0x5A7E_0001_u64, max_steps: 48, capture: CaptureConfig::final_only() };
     group.throughput(Throughput::Elements(state_run_config.max_steps));
     group.bench_function("single_run_state_modifiers", move |b| {
         b.iter(|| {
@@ -577,7 +577,7 @@ fn benches_simulation_hotspots(c: &mut Criterion) {
         runs: 24,
         base_seed: 0xA0A0_4242_u64,
         execution_mode: ExecutionMode::SingleThread,
-        run_template: BatchRunTemplate { max_steps: 48, capture: CaptureConfig::disabled() },
+        run_template: BatchRunTemplate { max_steps: 48, capture: CaptureConfig::final_only() },
     };
     group.throughput(Throughput::Elements(batch_expression_config.runs));
     group.bench_function("batch_run_expression_fanout", move |b| {
@@ -599,7 +599,7 @@ fn benches_simulation_hotspots(c: &mut Criterion) {
             runs: 24,
             base_seed: 0xA0A0_4242_u64,
             execution_mode: ExecutionMode::Rayon,
-            run_template: BatchRunTemplate { max_steps: 48, capture: CaptureConfig::disabled() },
+            run_template: BatchRunTemplate { max_steps: 48, capture: CaptureConfig::final_only() },
         };
         group.throughput(Throughput::Elements(batch_expression_config_rayon.runs));
         group.bench_function("batch_run_expression_fanout_rayon", move |b| {

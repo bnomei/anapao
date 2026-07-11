@@ -1,8 +1,8 @@
 use std::fs;
 
 use anapao::types::{
-    BatchConfig, BatchRunTemplate, CaptureConfig, EndConditionSpec, ExecutionMode, MetricKey,
-    RunConfig, ScenarioSpec, TransferSpec,
+    BatchConfig, BatchRunTemplate, CaptureConfig, CaptureSchedule, EndConditionSpec, ExecutionMode,
+    MetricKey, RunConfig, ScenarioSpec, TransferSpec,
 };
 use anapao::Simulator;
 
@@ -28,16 +28,20 @@ fn readme_s02_compile_scenario() {
 
 #[test]
 fn readme_s03_create_deterministic_run_config() {
-    let run = RunConfig::for_seed(42).with_max_steps(250).with_capture(CaptureConfig {
-        every_n_steps: 5,
-        include_step_zero: true,
-        include_final_state: true,
-        ..CaptureConfig::default()
-    });
+    let run = RunConfig::for_seed(42).with_max_steps(250).with_capture(
+        CaptureConfig::default().with_schedule(CaptureSchedule::Every {
+            stride: std::num::NonZeroU64::new(5).expect("positive stride"),
+            include_initial: true,
+            include_final: true,
+        }),
+    );
 
     assert_eq!(run.seed, 42);
     assert_eq!(run.max_steps, 250);
-    assert_eq!(run.capture.every_n_steps, 5);
+    assert!(matches!(
+        run.capture.schedule(),
+        CaptureSchedule::Every { stride, .. } if stride.get() == 5
+    ));
 }
 
 #[test]
@@ -76,7 +80,7 @@ fn readme_contains_curated_builder_snippet_signatures() {
         "### Snippet S02 — Compile a Scenario",
         "assert_eq!(compiled.scenario_id().as_str(), \"scenario-source-sink\");",
         "### Snippet S03 — Create a Deterministic RunConfig",
-        "let run = RunConfig::for_seed(42).with_max_steps(250).with_capture(CaptureConfig {",
+        "CaptureConfig::default().with_schedule(CaptureSchedule::Every {",
         "### Snippet S07 — Create BatchConfig",
         "let batch = BatchConfig::for_runs(64)",
     ] {

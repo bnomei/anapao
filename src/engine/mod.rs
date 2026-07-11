@@ -21,10 +21,10 @@ use crate::stochastic::{
     sample_weighted_index,
 };
 use crate::types::{
-    ConnectionKind, EdgeId, EndConditionSpec, MetricKey, NodeConfig, NodeId, NodeKind,
-    NodeModeConfig, NodeSnapshot, RunConfig, RunReport, SeriesPoint, SeriesTable,
-    StateConnectionRole, StateConnectionTarget, TransferRecord, TransferSpec, TriggerMode,
-    VariableSnapshot, VariableSourceSpec, VariableUpdateTiming,
+    CaptureConfig, CaptureSchedule, ConnectionKind, EdgeId, EndConditionSpec, MetricKey,
+    NodeConfig, NodeId, NodeKind, NodeModeConfig, NodeSnapshot, RunConfig, RunReport, Selection,
+    SeriesPoint, SeriesTable, StateConnectionRole, StateConnectionTarget, TransferRecord,
+    TransferSpec, TriggerMode, VariableSnapshot, VariableSourceSpec, VariableUpdateTiming,
 };
 use crate::CompiledScenario;
 
@@ -38,6 +38,127 @@ pub(crate) struct EngineState {
     pub step: u64,
     pub node_values: Vec<f64>,
     pub metrics: BTreeMap<MetricKey, f64>,
+}
+
+/// Private retention sink for the single shared simulation transition loop.
+///
+/// It owns the full single-run report shape while keeping capture policy decisions
+/// separate from event emission. Transfer records are retained only when selected;
+/// each step's transient records remain available long enough for live events.
+struct FullReportCollector<'a> {
+    capture: &'a CaptureConfig,
+    report: RunReport,
+    captured_steps: BTreeSet<u64>,
+    step_transfers: Vec<TransferRecord>,
+}
+
+trait TransferCollector {
+    fn record_transfer(&mut self, transfer: TransferRecord);
+}
+
+impl<'a> FullReportCollector<'a> {
+    fn new(compiled: &CompiledScenario, config: &'a RunConfig) -> Self {
+        Self {
+            capture: &config.capture,
+            report: RunReport::new(compiled.scenario_id().clone(), config.seed),
+            captured_steps: BTreeSet::new(),
+            step_transfers: Vec::new(),
+        }
+    }
+
+    fn capture_step(
+        &mut self,
+        compiled: &CompiledScenario,
+        state: &EngineState,
+        runtime_variables: &BTreeMap<String, f64>,
+        force: bool,
+    ) {
+        if !should_capture_step(self.capture, state.step, force)
+            || !self.captured_steps.insert(state.step)
+        {
+            return;
+        }
+
+        let mut snapshot = NodeSnapshot::new(state.step);
+        for (index, node_id) in compiled.node_ids().iter().enumerate() {
+            if selected(self.capture.nodes(), node_id) {
+                snapshot
+                    .values
+                    .insert(node_id.clone(), canonicalize_float(state.node_values[index]));
+            }
+        }
+        if !snapshot.values.is_empty() {
+            self.report.node_snapshots.push(snapshot);
+        }
+
+        if !runtime_variables.is_empty() && !self.capture.variables().is_none() {
+            let mut snapshot = VariableSnapshot::new(state.step);
+            for (name, value) in runtime_variables {
+                if selected(self.capture.variables(), name) {
+                    snapshot.values.insert(name.clone(), canonicalize_float(*value));
+                }
+            }
+            if !snapshot.values.is_empty() {
+                self.report.variable_snapshots.push(snapshot);
+            }
+        }
+
+        match self.capture.metrics() {
+            Selection::None => {}
+            Selection::All => {
+                for (metric, value) in &state.metrics {
+                    let table = self
+                        .report
+                        .series
+                        .entry(metric.clone())
+                        .or_insert_with(|| SeriesTable::new(metric.clone()));
+                    table.points.push(SeriesPoint::new(state.step, canonicalize_float(*value)));
+                }
+            }
+            Selection::Only(metrics) => {
+                for metric in metrics {
+                    let value = metric_value(compiled, state, metric);
+                    let table = self
+                        .report
+                        .series
+                        .entry(metric.clone())
+                        .or_insert_with(|| SeriesTable::new(metric.clone()));
+                    table.points.push(SeriesPoint::new(state.step, canonicalize_float(value)));
+                }
+            }
+        }
+    }
+
+    fn take_step_transfers(&mut self) -> Vec<TransferRecord> {
+        std::mem::take(&mut self.step_transfers)
+    }
+
+    fn finish(
+        mut self,
+        compiled: &CompiledScenario,
+        state: &EngineState,
+        completed: bool,
+    ) -> RunReport {
+        self.report.steps_executed = state.step;
+        self.report.completed = completed;
+        self.report.final_node_values = compiled
+            .node_ids()
+            .iter()
+            .enumerate()
+            .map(|(index, node_id)| (node_id.clone(), canonicalize_float(state.node_values[index])))
+            .collect();
+        self.report.final_metrics = state.metrics.clone();
+        self.report
+    }
+}
+
+impl TransferCollector for FullReportCollector<'_> {
+    fn record_transfer(&mut self, transfer: TransferRecord) {
+        if selected(self.capture.transfers(), &transfer.edge_id) {
+            self.report.transfers.push(transfer.clone());
+        }
+        self.step_transfers.push(transfer);
+    }
 }
 
 #[derive(Debug)]
@@ -491,7 +612,7 @@ fn run_single_internal(
 ) -> Result<RunReport, RunError> {
     validate_capture_selection(compiled, config)?;
 
-    let mut report = RunReport::new(compiled.scenario_id().clone(), config.seed);
+    let mut collector = FullReportCollector::new(compiled, config);
     let mut state = init_state(compiled);
     let runtime = ExprRuntime::new();
     let expression_cache = ExpressionPlanRef::new(compiled);
@@ -499,19 +620,8 @@ fn run_single_internal(
     let mut variables = VariableRuntimeState::from_compiled(compiled, config.seed);
     let mut gates = GateRuntimeState::from_seed(config.seed);
     let mut timeline = TimelineRuntimeState::from_compiled(compiled, &state);
-    let mut transfer_log = Vec::<TransferRecord>::new();
     variables.refresh_initial();
-    let mut captured_steps = BTreeSet::new();
-
-    capture_step(
-        compiled,
-        config,
-        &state,
-        variables.values(),
-        &mut report,
-        &mut captured_steps,
-        false,
-    );
+    collector.capture_step(compiled, &state, variables.values(), false);
 
     let mut completed = end_conditions_met(compiled, &state);
 
@@ -548,7 +658,6 @@ fn run_single_internal(
 
         apply_source_generation(compiled, &mut state);
         timeline.begin_step(compiled, attempted_step);
-        let transfer_start = transfer_log.len();
         apply_edge_transfers(
             compiled,
             step_plan,
@@ -559,9 +668,9 @@ fn run_single_internal(
             &mut gates,
             &mut timeline,
             attempted_step,
-            &mut transfer_log,
+            &mut collector,
         )?;
-        for (ordinal, transfer) in transfer_log[transfer_start..].iter().enumerate() {
+        for (ordinal, transfer) in collector.take_step_transfers().into_iter().enumerate() {
             emit_event(RunEvent::transfer(
                 run_id,
                 transfer.step,
@@ -587,15 +696,7 @@ fn run_single_internal(
         refresh_metrics(compiled, &mut state);
         emit_metric_snapshots(run_id, state.step, &state.metrics, emit_event)?;
 
-        capture_step(
-            compiled,
-            config,
-            &state,
-            variables.values(),
-            &mut report,
-            &mut captured_steps,
-            false,
-        );
+        collector.capture_step(compiled, &state, variables.values(), false);
         completed = end_conditions_met(compiled, &state);
         let terminal_step_reached = completed || state.step >= config.max_steps;
         if !(defer_terminal_step_end && terminal_step_reached) {
@@ -603,33 +704,11 @@ fn run_single_internal(
         }
     }
 
-    if config.capture.include_final_state {
-        capture_step(
-            compiled,
-            config,
-            &state,
-            variables.values(),
-            &mut report,
-            &mut captured_steps,
-            true,
-        );
+    if captures_final(config.capture.schedule()) {
+        collector.capture_step(compiled, &state, variables.values(), true);
     }
 
-    report.steps_executed = state.step;
-    report.completed = completed;
-    report.final_node_values = compiled
-        .node_ids()
-        .iter()
-        .enumerate()
-        .map(|(index, node_id)| {
-            let value = state.node_values[index];
-            (node_id.clone(), canonicalize_float(value))
-        })
-        .collect::<BTreeMap<_, _>>();
-    report.final_metrics = state.metrics.clone();
-    report.transfers = transfer_log;
-
-    Ok(report)
+    Ok(collector.finish(compiled, &state, completed))
 }
 
 fn emit_metric_snapshots(
@@ -709,7 +788,7 @@ fn apply_edge_transfers(
     gates: &mut GateRuntimeState,
     timeline: &mut TimelineRuntimeState,
     step: u64,
-    transfer_log: &mut Vec<TransferRecord>,
+    transfer_collector: &mut dyn TransferCollector,
 ) -> Result<(), RunError> {
     let mut triggers = collect_step_triggers(compiled, step_plan, state);
     let mut settled_groups: BTreeSet<(usize, TransferControl)> = BTreeSet::new();
@@ -759,7 +838,7 @@ fn apply_edge_transfers(
                         gates,
                         timeline,
                         step,
-                        transfer_log,
+                        transfer_collector,
                     )?
                 } else {
                     match control {
@@ -773,7 +852,7 @@ fn apply_edge_transfers(
                                 runtime_variables,
                                 timeline,
                                 step,
-                                transfer_log,
+                                transfer_collector,
                             )?
                         }
                         TransferControl::PullAll | TransferControl::PushAll => {
@@ -786,7 +865,7 @@ fn apply_edge_transfers(
                                 runtime_variables,
                                 timeline,
                                 step,
-                                transfer_log,
+                                transfer_collector,
                             )?
                         }
                     }
@@ -832,7 +911,7 @@ fn apply_any_edge_group(
     runtime_variables: &BTreeMap<String, f64>,
     timeline: &mut TimelineRuntimeState,
     step: u64,
-    transfer_log: &mut Vec<TransferRecord>,
+    transfer_collector: &mut dyn TransferCollector,
 ) -> Result<bool, RunError> {
     let mut acted = false;
     for edge_id in edge_ids {
@@ -852,7 +931,7 @@ fn apply_any_edge_group(
         else {
             continue;
         };
-        apply_transfer_plan(compiled, state, plan, timeline, step, transfer_log)?;
+        apply_transfer_plan(compiled, state, plan, timeline, step, transfer_collector)?;
         acted = true;
     }
     Ok(acted)
@@ -872,7 +951,7 @@ fn apply_all_edge_group(
     runtime_variables: &BTreeMap<String, f64>,
     timeline: &mut TimelineRuntimeState,
     step: u64,
-    transfer_log: &mut Vec<TransferRecord>,
+    transfer_collector: &mut dyn TransferCollector,
 ) -> Result<bool, RunError> {
     let mut plans = Vec::new();
     let mut total_requested_by_source = BTreeMap::<usize, f64>::new();
@@ -917,7 +996,7 @@ fn apply_all_edge_group(
     }
 
     for plan in plans {
-        apply_transfer_plan(compiled, state, plan, timeline, step, transfer_log)?;
+        apply_transfer_plan(compiled, state, plan, timeline, step, transfer_collector)?;
     }
 
     Ok(true)
@@ -971,7 +1050,7 @@ fn apply_gate_edge_group(
     gates: &mut GateRuntimeState,
     timeline: &mut TimelineRuntimeState,
     step: u64,
-    transfer_log: &mut Vec<TransferRecord>,
+    transfer_collector: &mut dyn TransferCollector,
 ) -> Result<bool, RunError> {
     let routing = match gate_routing_for_group(
         compiled,
@@ -994,7 +1073,7 @@ fn apply_gate_edge_group(
                     runtime_variables,
                     timeline,
                     step,
-                    transfer_log,
+                    transfer_collector,
                 )?,
                 TransferControl::PullAll | TransferControl::PushAll => apply_all_edge_group(
                     compiled,
@@ -1005,7 +1084,7 @@ fn apply_gate_edge_group(
                     runtime_variables,
                     timeline,
                     step,
-                    transfer_log,
+                    transfer_collector,
                 )?,
             });
         }
@@ -1067,7 +1146,7 @@ fn apply_gate_edge_group(
             },
             timeline,
             step,
-            transfer_log,
+            transfer_collector,
         )?;
         acted = true;
     }
@@ -1298,7 +1377,7 @@ fn apply_transfer_plan(
     plan: EdgeTransferPlan,
     timeline: &mut TimelineRuntimeState,
     step: u64,
-    transfer_log: &mut Vec<TransferRecord>,
+    transfer_collector: &mut dyn TransferCollector,
 ) -> Result<(), RunError> {
     let transfer = accepted_arrival(compiled, state, plan.to_index, plan.transfer)?;
 
@@ -1316,7 +1395,7 @@ fn apply_transfer_plan(
     timeline.record_release(compiled, from_node_id, transfer);
     timeline.record_arrival(compiled, to_node_id, transfer, step);
 
-    transfer_log.push(TransferRecord {
+    transfer_collector.record_transfer(TransferRecord {
         step,
         edge_id: plan.edge_id,
         from_node_id: plan.from_node_id,
@@ -1820,109 +1899,89 @@ fn end_condition_met(
     }
 }
 
-fn capture_step(
-    compiled: &CompiledScenario,
-    config: &RunConfig,
-    state: &EngineState,
-    runtime_variables: &BTreeMap<String, f64>,
-    report: &mut RunReport,
-    captured_steps: &mut BTreeSet<u64>,
-    force: bool,
-) {
-    if !should_capture_step(config, state.step, force) {
-        return;
-    }
-
-    if !captured_steps.insert(state.step) {
-        return;
-    }
-
-    let capture_all_nodes = config.capture.capture_nodes.is_empty();
-    let mut snapshot = NodeSnapshot::new(state.step);
-    for (index, node_id) in compiled.node_ids().iter().enumerate() {
-        if capture_all_nodes || config.capture.capture_nodes.contains(node_id) {
-            let value = state.node_values[index];
-            snapshot.values.insert(node_id.clone(), canonicalize_float(value));
-        }
-    }
-    if !snapshot.values.is_empty() {
-        report.node_snapshots.push(snapshot);
-    }
-
-    if !runtime_variables.is_empty() {
-        let mut snapshot = VariableSnapshot::new(state.step);
-        for (name, value) in runtime_variables {
-            snapshot.values.insert(name.clone(), canonicalize_float(*value));
-        }
-        if !snapshot.values.is_empty() {
-            report.variable_snapshots.push(snapshot);
-        }
-    }
-
-    if config.capture.capture_metrics.is_empty() {
-        for (metric, value) in &state.metrics {
-            let table = report
-                .series
-                .entry(metric.clone())
-                .or_insert_with(|| SeriesTable::new(metric.clone()));
-            table.points.push(SeriesPoint::new(state.step, canonicalize_float(*value)));
-        }
-    } else {
-        for metric in &config.capture.capture_metrics {
-            let value = metric_value(compiled, state, metric);
-            let table = report
-                .series
-                .entry(metric.clone())
-                .or_insert_with(|| SeriesTable::new(metric.clone()));
-            table.points.push(SeriesPoint::new(state.step, canonicalize_float(value)));
-        }
-    }
-}
-
-/// Rejects capture selections that reference nothing in the compiled scenario.
-/// An unknown `capture_metrics` key would otherwise resolve to `0.0` via
+/// Rejects typed capture selections that reference nothing in the compiled scenario.
+/// An unknown metric key would otherwise resolve to `0.0` via
 /// `metric_value` and emit a fabricated all-zero series under the wrong label; an
-/// unknown `capture_nodes` id would be silently ignored. A capture metric is valid
+/// unknown node id would be silently ignored. A capture metric is valid
 /// if it resolves to a node (node-backed metric) or is a tracked metric, mirroring
 /// what `metric_value` can actually resolve.
 fn validate_capture_selection(
     compiled: &CompiledScenario,
     config: &RunConfig,
 ) -> Result<(), RunError> {
-    for node_id in &config.capture.capture_nodes {
-        if compiled.node_index(node_id).is_none() {
-            return Err(RunError::InvalidRunConfig {
-                name: format!("run.capture.capture_nodes.{node_id}"),
-                reason: "references an unknown node".to_string(),
-            });
+    config.capture.validate().map_err(|reason| RunError::InvalidRunConfig {
+        name: "run.capture".to_string(),
+        reason: reason.to_string(),
+    })?;
+
+    if let Selection::Only(node_ids) = config.capture.nodes() {
+        for node_id in node_ids {
+            if compiled.node_index(node_id).is_none() {
+                return Err(RunError::InvalidRunConfig {
+                    name: format!("run.capture.nodes.{node_id}"),
+                    reason: "references an unknown node".to_string(),
+                });
+            }
         }
     }
 
-    for metric in &config.capture.capture_metrics {
-        let resolves = metric_node_index(compiled, metric).is_some()
-            || compiled.tracked_metrics().contains(metric);
-        if !resolves {
-            return Err(RunError::InvalidRunConfig {
-                name: format!("run.capture.capture_metrics.{metric}"),
-                reason: "does not resolve to a tracked metric or node".to_string(),
-            });
+    if let Selection::Only(metrics) = config.capture.metrics() {
+        for metric in metrics {
+            let resolves = metric_node_index(compiled, metric).is_some()
+                || compiled.tracked_metrics().contains(metric);
+            if !resolves {
+                return Err(RunError::InvalidRunConfig {
+                    name: format!("run.capture.metrics.{metric}"),
+                    reason: "does not resolve to a tracked metric or node".to_string(),
+                });
+            }
+        }
+    }
+
+    if let Selection::Only(variables) = config.capture.variables() {
+        for variable in variables {
+            if !compiled.variables().sources.contains_key(variable) {
+                return Err(RunError::InvalidRunConfig {
+                    name: format!("run.capture.variables.{variable}"),
+                    reason: "references an unknown scenario variable".to_string(),
+                });
+            }
+        }
+    }
+
+    if let Selection::Only(edges) = config.capture.transfers() {
+        for edge in edges {
+            if compiled.edge_index(edge).is_none() {
+                return Err(RunError::InvalidRunConfig {
+                    name: format!("run.capture.transfers.{edge}"),
+                    reason: "references an unknown edge".to_string(),
+                });
+            }
         }
     }
 
     Ok(())
 }
 
-fn should_capture_step(config: &RunConfig, step: u64, force: bool) -> bool {
+fn should_capture_step(capture: &CaptureConfig, step: u64, force: bool) -> bool {
     if force {
         return true;
     }
 
-    if step == 0 {
-        return config.capture.include_step_zero;
+    match capture.schedule() {
+        CaptureSchedule::None | CaptureSchedule::Final => false,
+        CaptureSchedule::Every { stride, include_initial, .. } if step == 0 => *include_initial,
+        CaptureSchedule::Every { stride, .. } => step % stride.get() == 0,
     }
+}
 
-    let interval = config.capture.every_n_steps.max(1);
-    step % interval == 0
+fn captures_final(schedule: &CaptureSchedule) -> bool {
+    matches!(schedule, CaptureSchedule::Final | CaptureSchedule::Every { include_final: true, .. })
+}
+
+fn selected<T: Ord>(selection: &Selection<T>, value: &T) -> bool {
+    matches!(selection, Selection::All)
+        || matches!(selection, Selection::Only(values) if values.contains(value))
 }
 
 fn canonicalize_float(value: f64) -> f64 {
@@ -1954,7 +2013,7 @@ fn to_scaled_i64(value: f64) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use crate::error::RunError;
     use crate::rng::rng_from_seed;
@@ -1962,7 +2021,7 @@ mod tests {
     use crate::types::{
         ActionMode, CaptureConfig, ConnectionKind, DelayNodeConfig, EdgeConnectionConfig, EdgeId,
         EdgeSpec, EndConditionSpec, MetricKey, NodeConfig, NodeId, NodeKind, NodeModeConfig,
-        NodeSpec, PoolNodeConfig, QueueNodeConfig, RunConfig, ScenarioId, ScenarioSpec,
+        NodeSpec, PoolNodeConfig, QueueNodeConfig, RunConfig, ScenarioId, ScenarioSpec, Selection,
         StateConnectionConfig, StateConnectionRole, StateConnectionTarget, TransferSpec,
         TriggerMode, VariableRuntimeConfig, VariableSourceSpec, VariableUpdateTiming,
     };
@@ -2024,7 +2083,7 @@ mod tests {
         scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 1 }];
 
         let compiled = compile_scenario(&scenario).expect("scenario should compile");
-        let config = RunConfig { seed: 1, max_steps: 5, capture: CaptureConfig::disabled() };
+        let config = RunConfig { seed: 1, max_steps: 5, capture: CaptureConfig::final_only() };
         let report = run_single(&compiled, &config).expect("run should succeed");
 
         assert_eq!(report.final_node_values.get(&pool), Some(&0.0));
@@ -2060,7 +2119,7 @@ mod tests {
         scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 1 }];
 
         let compiled = compile_scenario(&scenario).expect("scenario should compile");
-        let config = RunConfig { seed: 1, max_steps: 5, capture: CaptureConfig::disabled() };
+        let config = RunConfig { seed: 1, max_steps: 5, capture: CaptureConfig::final_only() };
         let report = run_single(&compiled, &config).expect("run should succeed");
 
         assert_eq!(report.final_node_values.get(&sink_a), Some(&8.0));
@@ -2119,7 +2178,7 @@ mod tests {
         scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 1 }];
 
         let compiled = compile_scenario(&scenario).expect("scenario should compile");
-        let config = RunConfig { seed: 7, max_steps: 5, capture: CaptureConfig::disabled() };
+        let config = RunConfig { seed: 7, max_steps: 5, capture: CaptureConfig::final_only() };
         let report = run_single(&compiled, &config).expect("run should succeed");
 
         assert_eq!(report.final_node_values.get(&sink_a), Some(&2.0));
@@ -2157,7 +2216,7 @@ mod tests {
         scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 1 }];
 
         let compiled = compile_scenario(&scenario).expect("scenario should compile");
-        let config = RunConfig { seed: 12, max_steps: 5, capture: CaptureConfig::disabled() };
+        let config = RunConfig { seed: 12, max_steps: 5, capture: CaptureConfig::final_only() };
         let report = run_single(&compiled, &config).expect("run should succeed");
 
         assert_eq!(report.final_node_values.get(&node_a), Some(&8.0));
@@ -2189,7 +2248,7 @@ mod tests {
         scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 1 }];
 
         let compiled = compile_scenario(&scenario).expect("scenario should compile");
-        let config = RunConfig { seed: 2, max_steps: 5, capture: CaptureConfig::disabled() };
+        let config = RunConfig { seed: 2, max_steps: 5, capture: CaptureConfig::final_only() };
         let report = run_single(&compiled, &config).expect("run should succeed");
 
         assert_eq!(report.final_node_values.get(&source), Some(&3.0));
@@ -2214,7 +2273,7 @@ mod tests {
         scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 2 }];
 
         let compiled = compile_scenario(&scenario).expect("scenario should compile");
-        let config = RunConfig { seed: 8, max_steps: 10, capture: CaptureConfig::disabled() };
+        let config = RunConfig { seed: 8, max_steps: 10, capture: CaptureConfig::final_only() };
         let report_a = run_single(&compiled, &config).expect("run should succeed");
         let report_b = run_single(&compiled, &config).expect("run should succeed");
 
@@ -2241,7 +2300,7 @@ mod tests {
         scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 1 }];
 
         let compiled = compile_scenario(&scenario).expect("scenario should compile");
-        let config = RunConfig { seed: 8, max_steps: 10, capture: CaptureConfig::disabled() };
+        let config = RunConfig { seed: 8, max_steps: 10, capture: CaptureConfig::final_only() };
         let error = run_single(&compiled, &config).expect_err("unknown variable must fail");
 
         match error {
@@ -2281,7 +2340,7 @@ mod tests {
         let roll = sample_closed_interval(1, 3, &mut expected_rng).expect("valid interval");
 
         let compiled = compile_scenario(&scenario).expect("scenario should compile");
-        let config = RunConfig { seed, max_steps: 10, capture: CaptureConfig::disabled() };
+        let config = RunConfig { seed, max_steps: 10, capture: CaptureConfig::final_only() };
         let report_a = run_single(&compiled, &config).expect("run should succeed");
         let report_b = run_single(&compiled, &config).expect("run should succeed");
 
@@ -2320,7 +2379,7 @@ mod tests {
             .sum::<f64>();
 
         let compiled = compile_scenario(&scenario).expect("scenario should compile");
-        let config = RunConfig { seed, max_steps: 10, capture: CaptureConfig::disabled() };
+        let config = RunConfig { seed, max_steps: 10, capture: CaptureConfig::final_only() };
         let report = run_single(&compiled, &config).expect("run should succeed");
 
         assert_eq!(report.final_node_values.get(&sink), Some(&expected_total));
@@ -2369,7 +2428,7 @@ mod tests {
             .sum::<f64>();
 
         let compiled = compile_scenario(&scenario).expect("scenario should compile");
-        let config = RunConfig { seed, max_steps: 10, capture: CaptureConfig::disabled() };
+        let config = RunConfig { seed, max_steps: 10, capture: CaptureConfig::final_only() };
         let report_a = run_single(&compiled, &config).expect("run should succeed");
         let report_b = run_single(&compiled, &config).expect("run should succeed");
 
@@ -2408,7 +2467,7 @@ mod tests {
         scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 2 }];
 
         let compiled = compile_scenario(&scenario).expect("scenario should compile");
-        let config = RunConfig { seed: 7, max_steps: 5, capture: CaptureConfig::disabled() };
+        let config = RunConfig { seed: 7, max_steps: 5, capture: CaptureConfig::final_only() };
 
         let report_a = run_single(&compiled, &config).expect("run should succeed");
         let report_b = run_single(&compiled, &config).expect("run should succeed");
@@ -2450,7 +2509,7 @@ mod tests {
         scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 1 }];
 
         let compiled = compile_scenario(&scenario).expect("scenario should compile");
-        let config = RunConfig { seed: 7, max_steps: 5, capture: CaptureConfig::disabled() };
+        let config = RunConfig { seed: 7, max_steps: 5, capture: CaptureConfig::final_only() };
         let error = run_single(&compiled, &config).expect_err("unknown variable must fail");
 
         match error {
@@ -2493,7 +2552,7 @@ mod tests {
         scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 2 }];
 
         let compiled = compile_scenario(&scenario).expect("scenario should compile");
-        let config = RunConfig { seed: 16, max_steps: 10, capture: CaptureConfig::disabled() };
+        let config = RunConfig { seed: 16, max_steps: 10, capture: CaptureConfig::final_only() };
         let report_a = run_single(&compiled, &config).expect("run should succeed");
         let report_b = run_single(&compiled, &config).expect("run should succeed");
 
@@ -2540,7 +2599,7 @@ mod tests {
         scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 1 }];
 
         let compiled = compile_scenario(&scenario).expect("scenario should compile");
-        let config = RunConfig { seed: 9, max_steps: 5, capture: CaptureConfig::disabled() };
+        let config = RunConfig { seed: 9, max_steps: 5, capture: CaptureConfig::final_only() };
         let report = run_single(&compiled, &config).expect("run should succeed");
 
         assert_eq!(report.final_node_values.get(&actor), Some(&2.0));
@@ -2585,7 +2644,7 @@ mod tests {
         scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 1 }];
 
         let compiled = compile_scenario(&scenario).expect("scenario should compile");
-        let config = RunConfig { seed: 11, max_steps: 5, capture: CaptureConfig::disabled() };
+        let config = RunConfig { seed: 11, max_steps: 5, capture: CaptureConfig::final_only() };
         let report = run_single(&compiled, &config).expect("run should succeed");
 
         assert_eq!(report.final_node_values.get(&actor), Some(&4.0));
@@ -2609,7 +2668,7 @@ mod tests {
         scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 1 }];
 
         let compiled = compile_scenario(&scenario).expect("scenario should compile");
-        let config = RunConfig { seed: 10, max_steps: 5, capture: CaptureConfig::disabled() };
+        let config = RunConfig { seed: 10, max_steps: 5, capture: CaptureConfig::final_only() };
         let report = run_single(&compiled, &config).expect("run should succeed");
 
         assert_eq!(report.final_node_values.get(&actor), Some(&3.0));
@@ -2633,7 +2692,7 @@ mod tests {
         scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 2 }];
 
         let compiled = compile_scenario(&scenario).expect("scenario should compile");
-        let config = RunConfig { seed: 11, max_steps: 5, capture: CaptureConfig::disabled() };
+        let config = RunConfig { seed: 11, max_steps: 5, capture: CaptureConfig::final_only() };
         let report = run_single(&compiled, &config).expect("run should succeed");
 
         assert_eq!(report.final_node_values.get(&actor), Some(&2.0));
@@ -2666,7 +2725,7 @@ mod tests {
         scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 1 }];
 
         let compiled = compile_scenario(&scenario).expect("scenario should compile");
-        let config = RunConfig { seed: 12, max_steps: 5, capture: CaptureConfig::disabled() };
+        let config = RunConfig { seed: 12, max_steps: 5, capture: CaptureConfig::final_only() };
         let report = run_single(&compiled, &config).expect("run should succeed");
 
         assert_eq!(report.final_node_values.get(&source), Some(&3.0));
@@ -2699,7 +2758,7 @@ mod tests {
         scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 1 }];
 
         let compiled = compile_scenario(&scenario).expect("scenario should compile");
-        let config = RunConfig { seed: 13, max_steps: 5, capture: CaptureConfig::disabled() };
+        let config = RunConfig { seed: 13, max_steps: 5, capture: CaptureConfig::final_only() };
         let report = run_single(&compiled, &config).expect("run should succeed");
 
         assert_eq!(report.final_node_values.get(&source), Some(&0.0));
@@ -2732,7 +2791,7 @@ mod tests {
         scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 1 }];
 
         let compiled = compile_scenario(&scenario).expect("scenario should compile");
-        let config = RunConfig { seed: 14, max_steps: 5, capture: CaptureConfig::disabled() };
+        let config = RunConfig { seed: 14, max_steps: 5, capture: CaptureConfig::final_only() };
         let report = run_single(&compiled, &config).expect("run should succeed");
 
         assert_eq!(report.final_node_values.get(&source_a), Some(&2.0));
@@ -2765,7 +2824,7 @@ mod tests {
         scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 1 }];
 
         let compiled = compile_scenario(&scenario).expect("scenario should compile");
-        let config = RunConfig { seed: 15, max_steps: 5, capture: CaptureConfig::disabled() };
+        let config = RunConfig { seed: 15, max_steps: 5, capture: CaptureConfig::final_only() };
         let report = run_single(&compiled, &config).expect("run should succeed");
 
         assert_eq!(report.final_node_values.get(&source_a), Some(&0.0));
@@ -2806,7 +2865,7 @@ mod tests {
         scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 4 }];
 
         let compiled = compile_scenario(&scenario).expect("scenario should compile");
-        let config = RunConfig { seed: 31, max_steps: 10, capture: CaptureConfig::disabled() };
+        let config = RunConfig { seed: 31, max_steps: 10, capture: CaptureConfig::final_only() };
         let report = run_single(&compiled, &config).expect("run should succeed");
 
         assert_eq!(report.final_node_values.get(&source), Some(&0.0));
@@ -2848,7 +2907,7 @@ mod tests {
         scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 3 }];
 
         let compiled = compile_scenario(&scenario).expect("scenario should compile");
-        let config = RunConfig { seed: 32, max_steps: 10, capture: CaptureConfig::disabled() };
+        let config = RunConfig { seed: 32, max_steps: 10, capture: CaptureConfig::final_only() };
         let report = run_single(&compiled, &config).expect("run should succeed");
 
         assert_eq!(report.final_node_values.get(&source), Some(&0.0));
@@ -2878,29 +2937,29 @@ mod tests {
         };
 
         let compiled = build();
-        let mut capture = CaptureConfig::default();
-        capture.capture_metrics.insert(MetricKey::fixture("snk"));
+        let capture = CaptureConfig::default()
+            .with_metrics(Selection::Only(BTreeSet::from([MetricKey::fixture("snk")])));
         let config = RunConfig { seed: 1, max_steps: 5, capture };
         match run_single(&compiled, &config) {
             Err(RunError::InvalidRunConfig { name, .. }) => {
-                assert_eq!(name, "run.capture.capture_metrics.snk");
+                assert_eq!(name, "run.capture.metrics.snk");
             }
             other => panic!("expected InvalidRunConfig, got {other:?}"),
         }
 
-        let mut capture = CaptureConfig::default();
-        capture.capture_nodes.insert(NodeId::fixture("nope"));
+        let capture = CaptureConfig::default()
+            .with_nodes(Selection::Only(BTreeSet::from([NodeId::fixture("nope")])));
         let config = RunConfig { seed: 1, max_steps: 5, capture };
         match run_single(&compiled, &config) {
             Err(RunError::InvalidRunConfig { name, .. }) => {
-                assert_eq!(name, "run.capture.capture_nodes.nope");
+                assert_eq!(name, "run.capture.nodes.nope");
             }
             other => panic!("expected InvalidRunConfig, got {other:?}"),
         }
 
-        let mut capture = CaptureConfig::default();
-        capture.capture_metrics.insert(metric_sink.clone());
-        capture.capture_nodes.insert(sink.clone());
+        let capture = CaptureConfig::default()
+            .with_metrics(Selection::Only(BTreeSet::from([metric_sink.clone()])))
+            .with_nodes(Selection::Only(BTreeSet::from([sink.clone()])));
         let config = RunConfig { seed: 1, max_steps: 5, capture };
         run_single(&compiled, &config).expect("valid capture keys should run");
     }
@@ -2928,7 +2987,7 @@ mod tests {
         scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 3 }];
 
         let compiled = compile_scenario(&scenario).expect("scenario should compile");
-        let config = RunConfig { seed: 34, max_steps: 10, capture: CaptureConfig::disabled() };
+        let config = RunConfig { seed: 34, max_steps: 10, capture: CaptureConfig::final_only() };
         let report = run_single(&compiled, &config).expect("run should succeed");
 
         assert_eq!(report.final_node_values.get(&pool), Some(&10.0));
@@ -2961,7 +3020,7 @@ mod tests {
         scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 3 }];
 
         let compiled = compile_scenario(&scenario).expect("scenario should compile");
-        let config = RunConfig { seed: 33, max_steps: 10, capture: CaptureConfig::disabled() };
+        let config = RunConfig { seed: 33, max_steps: 10, capture: CaptureConfig::final_only() };
         let report = run_single(&compiled, &config).expect("run should succeed");
 
         assert_eq!(report.final_node_values.get(&queue), Some(&2.0));
@@ -3018,7 +3077,7 @@ mod tests {
         scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 6 }];
 
         let compiled = compile_scenario(&scenario).expect("scenario should compile");
-        let config = RunConfig { seed: 33, max_steps: 10, capture: CaptureConfig::disabled() };
+        let config = RunConfig { seed: 33, max_steps: 10, capture: CaptureConfig::final_only() };
         let report_a = run_single(&compiled, &config).expect("run should succeed");
         let report_b = run_single(&compiled, &config).expect("run should succeed");
 
@@ -3047,7 +3106,7 @@ mod tests {
         }];
 
         let compiled = compile_scenario(&scenario).expect("scenario should compile");
-        let config = RunConfig { seed: 3, max_steps: 10, capture: CaptureConfig::disabled() };
+        let config = RunConfig { seed: 3, max_steps: 10, capture: CaptureConfig::final_only() };
         let report = run_single(&compiled, &config).expect("run should succeed");
 
         assert_eq!(report.steps_executed, 2);
@@ -3080,7 +3139,7 @@ mod tests {
         ])];
 
         let compiled = compile_scenario(&scenario).expect("scenario should compile");
-        let config = RunConfig { seed: 4, max_steps: 10, capture: CaptureConfig::disabled() };
+        let config = RunConfig { seed: 4, max_steps: 10, capture: CaptureConfig::final_only() };
         let report = run_single(&compiled, &config).expect("run should succeed");
 
         assert_eq!(report.steps_executed, 2);
@@ -3105,7 +3164,7 @@ mod tests {
         scenario.end_conditions = vec![EndConditionSpec::MaxSteps { steps: 10 }];
 
         let compiled = compile_scenario(&scenario).expect("scenario should compile");
-        let config = RunConfig { seed: 5, max_steps: 3, capture: CaptureConfig::disabled() };
+        let config = RunConfig { seed: 5, max_steps: 3, capture: CaptureConfig::final_only() };
         let report = run_single(&compiled, &config).expect("run should succeed");
 
         assert_eq!(report.steps_executed, 3);

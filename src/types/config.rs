@@ -2,14 +2,13 @@
 //!
 //! [`RunConfig`] pins a single deterministic run. [`BatchConfig`] plus
 //! [`BatchRunTemplate`] describe Monte Carlo batches whose per-run seeds are
-//! derived from `base_seed` and run index. [`CaptureConfig`] selects which nodes
-//! and metrics appear in series and snapshots.
+//! derived from `base_seed` and run index.
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, num::NonZeroU64};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use super::{MetricKey, NodeId};
+use super::{EdgeId, MetricKey, NodeId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -44,54 +43,299 @@ impl ConfidenceLevel {
     }
 }
 
-/// Capture policy for per-step node and metric snapshots.
-///
-/// Use [`CaptureConfig::default`] for debugging/analysis-friendly traces
-/// or [`CaptureConfig::disabled`] for throughput-oriented runs.
+/// When diagnostics are sampled from a run lifecycle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
+pub enum CaptureSchedule {
+    /// Do not retain step-addressed diagnostics.
+    None,
+    /// Retain diagnostics only after the terminal state is known.
+    Final,
+    /// Retain diagnostics at a positive periodic stride.
+    Every {
+        /// Positive stride between captured steps.
+        stride: NonZeroU64,
+        /// Whether step zero is retained.
+        include_initial: bool,
+        /// Whether the terminal state is retained when off-stride.
+        include_final: bool,
+    },
+}
+
+/// Selection policy for one diagnostic channel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(tag = "kind", content = "items", rename_all = "snake_case")]
+#[serde(bound(deserialize = "T: Ord + Deserialize<'de>"))]
+#[serde(deny_unknown_fields)]
+pub enum Selection<T> {
+    /// Retain no values from this channel.
+    None,
+    /// Retain every available value from this channel.
+    All,
+    /// Retain the named values from this channel.
+    Only(BTreeSet<T>),
+}
+
+impl<T> Selection<T> {
+    /// Returns whether this policy explicitly retains no values.
+    pub fn is_none(&self) -> bool {
+        matches!(self, Self::None)
+    }
+
+    /// Returns the selected values when this is a concrete selection.
+    pub fn only(&self) -> Option<&BTreeSet<T>> {
+        match self {
+            Self::Only(values) => Some(values),
+            Self::None | Self::All => None,
+        }
+    }
+}
+
+/// Typed per-run diagnostic retention policy.
+///
+/// The fields are deliberately private so a config cannot reintroduce the old
+/// empty-set-means-all or zero-stride sentinels. Use constructors and consuming
+/// builders to make the requested retention policy explicit.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaptureConfig {
-    pub capture_nodes: BTreeSet<NodeId>,
-    pub capture_metrics: BTreeSet<MetricKey>,
-    pub every_n_steps: u64,
-    pub include_step_zero: bool,
-    pub include_final_state: bool,
+    schedule: CaptureSchedule,
+    nodes: Selection<NodeId>,
+    metrics: Selection<MetricKey>,
+    variables: Selection<String>,
+    transfers: Selection<EdgeId>,
 }
 
 impl Default for CaptureConfig {
     fn default() -> Self {
         Self {
-            capture_nodes: BTreeSet::new(),
-            capture_metrics: BTreeSet::new(),
-            every_n_steps: 1,
-            include_step_zero: true,
-            include_final_state: true,
+            schedule: CaptureSchedule::Every {
+                stride: NonZeroU64::MIN,
+                include_initial: true,
+                include_final: true,
+            },
+            nodes: Selection::All,
+            metrics: Selection::All,
+            variables: Selection::All,
+            transfers: Selection::All,
         }
     }
 }
 
 impl CaptureConfig {
-    /// Disables step-zero/final captures while preserving explicit selection sets.
+    /// Retains no step snapshots, series, variables, or transfer records.
+    #[must_use]
+    pub fn none() -> Self {
+        Self {
+            schedule: CaptureSchedule::None,
+            nodes: Selection::None,
+            metrics: Selection::None,
+            variables: Selection::None,
+            transfers: Selection::None,
+        }
+    }
+
+    /// Retains final node, metric, and variable diagnostics without transfers.
+    #[must_use]
+    pub fn final_only() -> Self {
+        Self {
+            schedule: CaptureSchedule::Final,
+            nodes: Selection::All,
+            metrics: Selection::All,
+            variables: Selection::All,
+            transfers: Selection::None,
+        }
+    }
+
+    /// Compatibility spelling for [`CaptureConfig::none`].
+    #[deprecated(since = "0.2.0", note = "use CaptureConfig::none()")]
+    #[must_use]
     pub fn disabled() -> Self {
-        Self { include_step_zero: false, include_final_state: false, ..Self::default() }
+        Self::none()
+    }
+
+    /// Returns the diagnostic sampling schedule.
+    pub fn schedule(&self) -> &CaptureSchedule {
+        &self.schedule
+    }
+
+    /// Returns the node snapshot selection.
+    pub fn nodes(&self) -> &Selection<NodeId> {
+        &self.nodes
+    }
+
+    /// Returns the metric series selection.
+    pub fn metrics(&self) -> &Selection<MetricKey> {
+        &self.metrics
+    }
+
+    /// Returns the variable snapshot selection.
+    pub fn variables(&self) -> &Selection<String> {
+        &self.variables
+    }
+
+    /// Returns the transfer-record selection.
+    pub fn transfers(&self) -> &Selection<EdgeId> {
+        &self.transfers
+    }
+
+    /// Replaces the diagnostic sampling schedule.
+    #[must_use]
+    pub fn with_schedule(mut self, schedule: CaptureSchedule) -> Self {
+        self.schedule = schedule;
+        self
+    }
+
+    /// Replaces the node snapshot selection.
+    #[must_use]
+    pub fn with_nodes(mut self, nodes: Selection<NodeId>) -> Self {
+        self.nodes = nodes;
+        self
+    }
+
+    /// Replaces the metric series selection.
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: Selection<MetricKey>) -> Self {
+        self.metrics = metrics;
+        self
+    }
+
+    /// Replaces the variable snapshot selection.
+    #[must_use]
+    pub fn with_variables(mut self, variables: Selection<String>) -> Self {
+        self.variables = variables;
+        self
+    }
+
+    /// Replaces the transfer-record selection.
+    #[must_use]
+    pub fn with_transfers(mut self, transfers: Selection<EdgeId>) -> Self {
+        self.transfers = transfers;
+        self
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), &'static str> {
+        if selection_is_empty(&self.nodes)
+            || selection_is_empty(&self.metrics)
+            || selection_is_empty(&self.variables)
+            || selection_is_empty(&self.transfers)
+        {
+            return Err("Only selections must not be empty");
+        }
+        Ok(())
+    }
+}
+
+fn selection_is_empty<T>(selection: &Selection<T>) -> bool {
+    matches!(selection, Selection::Only(values) if values.is_empty())
+}
+
+#[derive(Serialize)]
+struct CurrentCaptureConfigWire<'a> {
+    schedule: &'a CaptureSchedule,
+    nodes: &'a Selection<NodeId>,
+    metrics: &'a Selection<MetricKey>,
+    variables: &'a Selection<String>,
+    transfers: &'a Selection<EdgeId>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CurrentCaptureConfigWireOwned {
+    schedule: CaptureSchedule,
+    nodes: Selection<NodeId>,
+    metrics: Selection<MetricKey>,
+    variables: Selection<String>,
+    transfers: Selection<EdgeId>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyCaptureConfigWire {
+    #[serde(default)]
+    capture_nodes: BTreeSet<NodeId>,
+    #[serde(default)]
+    capture_metrics: BTreeSet<MetricKey>,
+    every_n_steps: u64,
+    include_step_zero: bool,
+    include_final_state: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum CaptureConfigWire {
+    Current(CurrentCaptureConfigWireOwned),
+    Legacy(LegacyCaptureConfigWire),
+}
+
+impl Serialize for CaptureConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        CurrentCaptureConfigWire {
+            schedule: &self.schedule,
+            nodes: &self.nodes,
+            metrics: &self.metrics,
+            variables: &self.variables,
+            transfers: &self.transfers,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for CaptureConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let config = match CaptureConfigWire::deserialize(deserializer)? {
+            CaptureConfigWire::Current(CurrentCaptureConfigWireOwned {
+                schedule,
+                nodes,
+                metrics,
+                variables,
+                transfers,
+            }) => Self { schedule, nodes, metrics, variables, transfers },
+            CaptureConfigWire::Legacy(LegacyCaptureConfigWire {
+                capture_nodes,
+                capture_metrics,
+                every_n_steps,
+                include_step_zero,
+                include_final_state,
+            }) => {
+                let stride = NonZeroU64::new(every_n_steps).ok_or_else(|| {
+                    serde::de::Error::custom("every_n_steps must be greater than 0")
+                })?;
+                Self {
+                    schedule: CaptureSchedule::Every {
+                        stride,
+                        include_initial: include_step_zero,
+                        include_final: include_final_state,
+                    },
+                    nodes: if capture_nodes.is_empty() {
+                        Selection::All
+                    } else {
+                        Selection::Only(capture_nodes)
+                    },
+                    metrics: if capture_metrics.is_empty() {
+                        Selection::All
+                    } else {
+                        Selection::Only(capture_metrics)
+                    },
+                    variables: Selection::All,
+                    transfers: Selection::All,
+                }
+            }
+        };
+        config.validate().map_err(serde::de::Error::custom)?;
+        Ok(config)
     }
 }
 
 /// Deterministic controls for one simulation run.
-///
-/// # Example
-/// ```rust
-/// use anapao::types::{CaptureConfig, RunConfig};
-///
-/// let run = RunConfig::for_seed(42).with_max_steps(250).with_capture(CaptureConfig {
-///     every_n_steps: 5,
-///     include_step_zero: false,
-///     ..CaptureConfig::default()
-/// });
-///
-/// assert_eq!(run.seed, 42);
-/// assert_eq!(run.max_steps, 250);
-/// assert_eq!(run.capture.every_n_steps, 5);
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunConfig {
     pub seed: u64,
@@ -107,17 +351,20 @@ impl Default for RunConfig {
 
 impl RunConfig {
     /// Creates a run config from a seed with default limits/capture policy.
+    #[must_use]
     pub fn for_seed(seed: u64) -> Self {
         Self { seed, ..Self::default() }
     }
 
     /// Sets the run step limit.
+    #[must_use]
     pub fn with_max_steps(mut self, max_steps: u64) -> Self {
         self.max_steps = max_steps;
         self
     }
 
     /// Replaces capture settings for the run.
+    #[must_use]
     pub fn with_capture(mut self, capture: CaptureConfig) -> Self {
         self.capture = capture;
         self
@@ -125,8 +372,6 @@ impl RunConfig {
 }
 
 /// Seed-agnostic run template used by batch execution.
-///
-/// `BatchConfig.base_seed` and run index derive the actual seed for each run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BatchRunTemplate {
     pub max_steps: u64,
@@ -140,45 +385,26 @@ impl Default for BatchRunTemplate {
 }
 
 impl BatchRunTemplate {
-    /// Sets the per-run step limit used by derived run configs.
+    #[must_use]
     pub fn with_max_steps(mut self, max_steps: u64) -> Self {
         self.max_steps = max_steps;
         self
     }
 
-    /// Replaces capture settings used by derived run configs.
+    #[must_use]
     pub fn with_capture(mut self, capture: CaptureConfig) -> Self {
         self.capture = capture;
         self
     }
 
     /// Builds a concrete run config for one derived seed.
+    #[must_use]
     pub fn to_run_config(&self, seed: u64) -> RunConfig {
         RunConfig { seed, max_steps: self.max_steps, capture: self.capture.clone() }
     }
 }
 
 /// Deterministic Monte Carlo controls for many runs.
-///
-/// The `base_seed` is used with run index derivation to produce stable per-run seeds.
-/// `run_template` stores seed-agnostic controls shared by all runs.
-///
-/// # Example
-/// ```rust
-/// use anapao::types::{BatchConfig, BatchRunTemplate, CaptureConfig, ExecutionMode};
-///
-/// let batch = BatchConfig::for_runs(128)
-///     .with_execution_mode(ExecutionMode::SingleThread)
-///     .with_base_seed(999)
-///     .with_run_template(BatchRunTemplate::default())
-///     .with_max_steps(50)
-///     .with_capture(CaptureConfig::disabled());
-///
-/// assert_eq!(batch.runs, 128);
-/// assert_eq!(batch.execution_mode, ExecutionMode::SingleThread);
-/// assert_eq!(batch.base_seed, 999);
-/// assert_eq!(batch.run_template.max_steps, 50);
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BatchConfig {
     pub runs: u64,
@@ -199,36 +425,36 @@ impl Default for BatchConfig {
 }
 
 impl BatchConfig {
-    /// Creates a batch config from a requested run count and default options.
+    #[must_use]
     pub fn for_runs(runs: u64) -> Self {
         Self { runs, ..Self::default() }
     }
 
-    /// Sets execution mode for the batch.
+    #[must_use]
     pub fn with_execution_mode(mut self, execution_mode: ExecutionMode) -> Self {
         self.execution_mode = execution_mode;
         self
     }
 
-    /// Sets the deterministic base seed used to derive per-run seeds.
+    #[must_use]
     pub fn with_base_seed(mut self, base_seed: u64) -> Self {
         self.base_seed = base_seed;
         self
     }
 
-    /// Replaces the default run template used for each batch run.
+    #[must_use]
     pub fn with_run_template(mut self, run_template: BatchRunTemplate) -> Self {
         self.run_template = run_template;
         self
     }
 
-    /// Sets max steps on the batch run template.
+    #[must_use]
     pub fn with_max_steps(mut self, max_steps: u64) -> Self {
         self.run_template.max_steps = max_steps;
         self
     }
 
-    /// Replaces capture settings on the batch run template.
+    #[must_use]
     pub fn with_capture(mut self, capture: CaptureConfig) -> Self {
         self.run_template.capture = capture;
         self

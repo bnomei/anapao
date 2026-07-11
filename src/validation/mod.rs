@@ -112,7 +112,7 @@ impl TryFrom<ScenarioSpec> for CompiledScenario {
     }
 }
 
-/// Rejects zero `max_steps` or zero capture strides on a [`RunConfig`].
+/// Rejects zero `max_steps` and malformed typed capture selections on a [`RunConfig`].
 pub(crate) fn validate_run_config(config: &RunConfig) -> Result<(), SetupError> {
     validate_run_config_with_prefix(config, "run")
 }
@@ -137,12 +137,10 @@ fn validate_run_config_with_prefix(config: &RunConfig, prefix: &str) -> Result<(
         });
     }
 
-    if config.capture.every_n_steps == 0 {
-        return Err(SetupError::InvalidParameter {
-            name: format!("{prefix}.capture.every_n_steps"),
-            reason: "must be greater than 0".to_string(),
-        });
-    }
+    config.capture.validate().map_err(|reason| SetupError::InvalidParameter {
+        name: format!("{prefix}.capture"),
+        reason: reason.to_string(),
+    })?;
 
     Ok(())
 }
@@ -158,12 +156,10 @@ fn validate_batch_run_template_with_prefix(
         });
     }
 
-    if template.capture.every_n_steps == 0 {
-        return Err(SetupError::InvalidParameter {
-            name: format!("{prefix}.capture.every_n_steps"),
-            reason: "must be greater than 0".to_string(),
-        });
-    }
+    template.capture.validate().map_err(|reason| SetupError::InvalidParameter {
+        name: format!("{prefix}.capture"),
+        reason: reason.to_string(),
+    })?;
 
     Ok(())
 }
@@ -2233,27 +2229,12 @@ mod tests {
     }
 
     #[test]
-    fn validate_run_config_rejects_zero_capture_interval() {
-        let config = RunConfig {
-            seed: 42,
-            max_steps: 1,
-            capture: CaptureConfig {
-                capture_nodes: Default::default(),
-                capture_metrics: Default::default(),
-                every_n_steps: 0,
-                include_step_zero: true,
-                include_final_state: true,
-            },
-        };
-
-        let error = validate_run_config(&config).expect_err("zero capture interval must fail");
-        match error {
-            SetupError::InvalidParameter { name, reason } => {
-                assert_eq!(name, "run.capture.every_n_steps");
-                assert_eq!(reason, "must be greater than 0");
-            }
-            other => panic!("expected InvalidParameter, got {other:?}"),
-        }
+    fn legacy_capture_deserialization_rejects_zero_capture_interval() {
+        let error = serde_json::from_str::<CaptureConfig>(
+            r#"{"capture_nodes":[],"capture_metrics":[],"every_n_steps":0,"include_step_zero":true,"include_final_state":true}"#,
+        )
+        .expect_err("zero legacy capture interval must fail");
+        assert!(error.to_string().contains("every_n_steps must be greater than 0"));
     }
 
     #[test]

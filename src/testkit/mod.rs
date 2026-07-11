@@ -275,9 +275,14 @@ mod tests {
         let run = deterministic_run_config();
         assert_eq!(run.seed, FIXTURE_RUN_SEED);
         assert_eq!(run.max_steps, FIXTURE_RUN_MAX_STEPS);
-        assert_eq!(run.capture.every_n_steps, 1);
-        assert!(run.capture.include_step_zero);
-        assert!(run.capture.include_final_state);
+        assert!(matches!(
+            run.capture.schedule(),
+            crate::types::CaptureSchedule::Every {
+                stride,
+                include_initial: true,
+                include_final: true,
+            } if stride.get() == 1
+        ));
 
         let batch = deterministic_batch_config();
         assert_eq!(batch.runs, FIXTURE_BATCH_RUNS);

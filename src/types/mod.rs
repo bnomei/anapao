@@ -372,11 +372,13 @@ mod tests {
     #[test]
     fn capture_and_run_defaults_are_stable() {
         let capture = CaptureConfig::default();
-        assert_eq!(capture.every_n_steps, 1);
-        assert!(capture.include_step_zero);
-        assert!(capture.include_final_state);
-        assert!(capture.capture_nodes.is_empty());
-        assert!(capture.capture_metrics.is_empty());
+        assert!(matches!(
+            capture.schedule(),
+            CaptureSchedule::Every { stride, include_initial: true, include_final: true }
+                if stride.get() == 1
+        ));
+        assert!(matches!(capture.nodes(), Selection::All));
+        assert!(matches!(capture.metrics(), Selection::All));
 
         let run = RunConfig::for_seed(99);
         assert_eq!(run.seed, 99);
@@ -388,12 +390,11 @@ mod tests {
 
     #[test]
     fn run_config_builders_override_defaults() {
-        let capture = CaptureConfig {
-            every_n_steps: 5,
-            include_step_zero: false,
-            include_final_state: false,
-            ..CaptureConfig::default()
-        };
+        let capture = CaptureConfig::default().with_schedule(CaptureSchedule::Every {
+            stride: std::num::NonZeroU64::new(5).expect("positive stride"),
+            include_initial: false,
+            include_final: false,
+        });
         let run = RunConfig::for_seed(77).with_max_steps(250).with_capture(capture.clone());
 
         assert_eq!(run.seed, 77);
@@ -403,12 +404,11 @@ mod tests {
 
     #[test]
     fn batch_config_builders_update_execution_and_run_template() {
-        let capture = CaptureConfig {
-            every_n_steps: 3,
-            include_step_zero: false,
-            include_final_state: true,
-            ..CaptureConfig::default()
-        };
+        let capture = CaptureConfig::default().with_schedule(CaptureSchedule::Every {
+            stride: std::num::NonZeroU64::new(3).expect("positive stride"),
+            include_initial: false,
+            include_final: true,
+        });
         let batch = BatchConfig::for_runs(12)
             .with_execution_mode(ExecutionMode::SingleThread)
             .with_base_seed(991)
