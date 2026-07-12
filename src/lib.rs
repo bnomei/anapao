@@ -15,6 +15,9 @@
 //!
 //! ## Concepts
 //! - `ScenarioSpec`: declarative simulation graph (nodes, edges, end conditions, metrics).
+//! - `Scenario`: immutable, semantically checked scenario domain value.
+//! - `ScenarioBuilder`: conventional checked Rust authoring with duplicate rejection.
+//! - `CompiledScenario`: opaque execution plan produced from either scenario representation.
 //! - `RunConfig`: deterministic single-run controls (`seed`, `max_steps`, diagnostic capture).
 //! - `BatchConfig`: deterministic Monte Carlo controls (`runs`, `base_seed`, execution mode,
 //!   aggregate metric sampling).
@@ -27,6 +30,74 @@
 //! controls batch metric series only. Event sinks are live streams and do not depend on either
 //! retention policy. Final assertions therefore work with no series, while step and series
 //! assertions require explicitly retained evidence.
+//!
+//! ## Stable Documents and Checked Authoring
+//!
+//! [`ScenarioSpec`] remains the serde wire contract. Deserialize it first, then cross the
+//! semantic boundary explicitly with [`Scenario::try_from`]. Checked values are not a second
+//! serde format.
+//!
+//! ```rust
+//! use anapao::{Scenario, ScenarioSpec};
+//!
+//! let document = serde_json::to_string(&anapao::testkit::fixture_scenario()).unwrap();
+//! let dto: ScenarioSpec = serde_json::from_str(&document).unwrap();
+//! let checked = Scenario::try_from(dto).unwrap();
+//!
+//! assert_eq!(checked.id().as_str(), "scenario-testkit");
+//! ```
+//!
+//! For conventional Rust authoring, use the checked builder and family constructors. This
+//! complete flow creates several node families, resource and state connections, run controls,
+//! compiles the checked value, and executes it.
+//!
+//! ```rust
+//! use std::num::NonZeroU64;
+//! use anapao::types::{
+//!     EdgeId, EndConditionSpec, MetricKey, NodeId, ResourceConnection, RunConfig,
+//!     ScenarioBuilder, ScenarioEdge, ScenarioId, ScenarioNode, StateConnection,
+//!     StateConnectionRole, StateTarget, TransferSpec,
+//! };
+//! use anapao::Simulator;
+//!
+//! let source = NodeId::fixture("source");
+//! let pool = NodeId::fixture("pool");
+//! let sink = NodeId::fixture("sink");
+//! let authored = ScenarioBuilder::new(ScenarioId::fixture("checked-authoring"))
+//!     .with_title("Checked authoring")
+//!     .with_description("resource and state flow")
+//!     .with_tag("docs")
+//!     .with_node(ScenarioNode::source(source.clone()).with_initial_value(2.0))?
+//!     .with_node(ScenarioNode::pool(pool.clone(), Default::default()).with_label("buffer"))?
+//!     .with_node(ScenarioNode::sink(sink.clone()))?
+//!     .with_edge(ScenarioEdge::resource(
+//!         EdgeId::fixture("source-pool"), source.clone(), pool.clone(),
+//!         TransferSpec::Fixed { amount: 1.0 },
+//!         ResourceConnection::default().with_token_size(NonZeroU64::new(1).unwrap()),
+//!     ))?
+//!     .with_edge(ScenarioEdge::resource(
+//!         EdgeId::fixture("pool-sink"), pool.clone(), sink,
+//!         TransferSpec::Remaining, ResourceConnection::default(),
+//!     ))?
+//!     .with_edge(ScenarioEdge::state(
+//!         EdgeId::fixture("source-pool-state"), source, pool,
+//!         TransferSpec::Remaining,
+//!         StateConnection::new(StateConnectionRole::Modifier, "+1", StateTarget::Node),
+//!     ))?
+//!     .with_end_condition(EndConditionSpec::MaxSteps { steps: 2 })
+//!     .with_tracked_metric(MetricKey::fixture("sink"))
+//!     .with_metadata("owner", "docs")
+//!     .build()?;
+//!
+//! let compiled = Simulator::compile_checked(authored)?;
+//! assert_eq!(compiled.source_spec().title.as_deref(), Some("Checked authoring"));
+//! let report = Simulator::run(&compiled, &RunConfig::for_seed(39)).unwrap();
+//! assert!(report.completed);
+//! # Ok::<(), anapao::error::SetupError>(())
+//! ```
+//!
+//! Existing DTO authoring remains supported: pass a [`ScenarioSpec`] to
+//! [`Simulator::compile`]. Both compile routes converge on the same opaque plan.
 //!
 //! ## Deterministic Single Run
 //! ```rust
@@ -155,8 +226,8 @@ pub use plan::CompiledScenario;
 pub use simulator::Simulator;
 pub use types::{
     AggregationConfig, BatchConfig, BatchReport, BatchRunTemplate, CaptureConfig, CaptureSchedule,
-    EndConditionSpec, ExecutionMode, MetricKey, RunConfig, RunReport, ScenarioSpec, Selection,
-    TransferSpec,
+    EndConditionSpec, ExecutionMode, MetricKey, RunConfig, RunReport, Scenario, ScenarioBuilder,
+    ScenarioSpec, Selection, TransferSpec,
 };
 
 #[cfg(doctest)]

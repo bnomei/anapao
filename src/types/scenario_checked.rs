@@ -547,24 +547,47 @@ impl ScenarioEdge {
 ///
 /// ```
 /// use anapao::types::{
-///     EdgeId, NodeId, ResourceConnection, ScenarioBuilder, ScenarioEdge, ScenarioId,
-///     ScenarioNode, TransferSpec,
+///     EdgeId, EndConditionSpec, MetricKey, NodeId, ResourceConnection, RunConfig,
+///     ScenarioBuilder, ScenarioEdge, ScenarioId, ScenarioNode, StateConnection,
+///     StateConnectionRole, StateTarget, TransferSpec,
 /// };
+/// use anapao::Simulator;
 ///
 /// let source = NodeId::fixture("source");
+/// let pool = NodeId::fixture("pool");
 /// let sink = NodeId::fixture("sink");
 /// let scenario = ScenarioBuilder::new(ScenarioId::fixture("authored"))
-///     .with_node(ScenarioNode::source(source.clone()).with_initial_value(1.0))?
+///     .with_title("Complete checked example")
+///     .with_node(ScenarioNode::source(source.clone()).with_initial_value(2.0))?
+///     .with_node(ScenarioNode::pool(pool.clone(), Default::default()))?
 ///     .with_node(ScenarioNode::sink(sink.clone()))?
 ///     .with_edge(ScenarioEdge::resource(
-///         EdgeId::fixture("source-sink"),
-///         source,
-///         sink,
+///         EdgeId::fixture("source-pool"),
+///         source.clone(),
+///         pool.clone(),
 ///         TransferSpec::Fixed { amount: 1.0 },
 ///         ResourceConnection::default(),
 ///     ))?
+///     .with_edge(ScenarioEdge::resource(
+///         EdgeId::fixture("pool-sink"),
+///         pool.clone(),
+///         sink,
+///         TransferSpec::Remaining,
+///         ResourceConnection::default(),
+///     ))?
+///     .with_edge(ScenarioEdge::state(
+///         EdgeId::fixture("source-pool-state"),
+///         source,
+///         pool,
+///         TransferSpec::Remaining,
+///         StateConnection::new(StateConnectionRole::Modifier, "+1", StateTarget::Node),
+///     ))?
+///     .with_end_condition(EndConditionSpec::MaxSteps { steps: 2 })
+///     .with_tracked_metric(MetricKey::fixture("sink"))
 ///     .build()?;
-/// assert_eq!(scenario.nodes().len(), 2);
+/// let compiled = Simulator::compile_checked(scenario)?;
+/// let report = Simulator::run(&compiled, &RunConfig::for_seed(39)).unwrap();
+/// assert!(report.completed);
 /// # Ok::<(), anapao::error::SetupError>(())
 /// ```
 ///

@@ -1,4 +1,4 @@
-//! Common compile/run/assert types re-exported for short import paths.
+//! Common checked-authoring, compile/run, and assertion types for short import paths.
 //!
 //! Prefer this when a test or tool only needs [`Simulator`], core report types,
 //! expectations, and event sinks without importing each submodule. `CaptureConfig` controls
@@ -9,7 +9,11 @@ pub use crate::assertions::{AssertionReport, Expectation, MetricSelector};
 pub use crate::events::{EventSink, VecEventSink};
 pub use crate::types::{
     AggregationConfig, BatchConfig, BatchReport, BatchRunTemplate, CaptureConfig, CaptureSchedule,
-    EndConditionSpec, ExecutionMode, MetricKey, RunConfig, RunReport, ScenarioSpec, Selection,
-    TransferSpec,
+    ConnectionSpec, ConverterConfig, DelayConfig, DrainConfig, EdgeId, EndConditionSpec,
+    ExecutionMode, MetricKey, MixedGateConfig, NodeBehavior, NodeId, NodeModeConfig, PoolConfig,
+    QueueConfig, RegisterConfig, ResourceConnection, RunConfig, RunReport, Scenario,
+    ScenarioBuilder, ScenarioEdge, ScenarioId, ScenarioNode, ScenarioSpec, Selection,
+    SortingGateConfig, StateConnection, StateConnectionRole, StateTarget, TraderConfig,
+    TransferSpec, TriggerGateConfig, VariableRuntimeConfig,
 };
 pub use crate::{CompiledScenario, Simulator};

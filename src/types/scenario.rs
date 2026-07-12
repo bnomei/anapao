@@ -1,9 +1,11 @@
 //! Declarative scenario graph: nodes, edges, transfers, variables, and end conditions.
 //!
-//! [`ScenarioSpec`] is the authoring surface compiled by
-//! [`crate::Simulator::compile`]. Node families, connection kinds (resource vs
-//! state), transfer rules, and end conditions encode the Machinations-style model
-//! the engine executes. Legacy node-kind aliases remain for older fixtures.
+//! [`ScenarioSpec`] is the stable serde document surface compiled by
+//! [`crate::Simulator::compile`]. To reject inconsistent tag/payload combinations before
+//! execution, convert it with [`super::Scenario::try_from`]. Programmatic checked authoring uses
+//! [`super::ScenarioBuilder`]; checked values deliberately do not define a second serde format.
+//! Node families, connection kinds, transfer rules, and end conditions encode the model the
+//! engine executes. Legacy node-kind aliases remain for older fixtures.
 
 use std::collections::{BTreeMap, BTreeSet};
 

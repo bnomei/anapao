@@ -16,7 +16,8 @@ The README and generated crate documentation are self-contained public documenta
 ## What You Will Build
 
 By the end, you will have a repeatable testing flow that can:
-- compile a `ScenarioSpec` into a validated executable model,
+- load a stable `ScenarioSpec` document or author an immutable checked `Scenario`,
+- compile either representation into the same opaque executable model,
 - execute seeded deterministic single runs,
 - execute deterministic Monte Carlo batches,
 - evaluate typed assertions with evidence,
@@ -36,6 +37,89 @@ anapao = "0.1.0"
 ```
 
 The crate does not install or expose a binary target; import `anapao` from your Rust code.
+
+---
+
+## Scenario Representations and the Validation Boundary
+
+Anapao has four deliberately distinct stages:
+
+1. `ScenarioSpec` is the stable serde wire DTO used to load, inspect, edit, and store documents.
+2. `Scenario::try_from` checks a DTO and produces an immutable semantic domain value.
+3. `ScenarioBuilder` and the `ScenarioNode`/`ScenarioEdge` family constructors author that checked
+   domain directly from Rust.
+4. `Simulator::compile` (legacy DTO input) or `Simulator::compile_checked` (checked input) produces
+   an opaque `CompiledScenario`, which `Simulator::run` executes.
+
+Checked types are not a second serde representation. Deserialize the stable DTO first:
+
+```rust
+use anapao::types::{Scenario, ScenarioSpec};
+
+let document = serde_json::to_string(&anapao::testkit::fixture_scenario()).unwrap();
+let dto: ScenarioSpec = serde_json::from_str(&document).unwrap();
+let checked = Scenario::try_from(dto).unwrap();
+
+assert_eq!(checked.id().as_str(), "scenario-testkit");
+```
+
+For programmatic authoring, use the complete checked builder. Its consuming insertion methods
+return `Result` because duplicate IDs are rejected:
+
+```rust
+use std::num::NonZeroU64;
+use anapao::types::{
+    EdgeId, EndConditionSpec, MetricKey, NodeId, ResourceConnection, RunConfig,
+    ScenarioBuilder, ScenarioEdge, ScenarioId, ScenarioNode, StateConnection,
+    StateConnectionRole, StateTarget, TransferSpec,
+};
+use anapao::Simulator;
+
+let source = NodeId::fixture("source");
+let pool = NodeId::fixture("pool");
+let sink = NodeId::fixture("sink");
+let scenario = ScenarioBuilder::new(ScenarioId::fixture("checked-authoring"))
+    .with_title("Checked authoring")
+    .with_description("resource and state flow")
+    .with_tag("docs")
+    .with_node(ScenarioNode::source(source.clone()).with_initial_value(2.0))?
+    .with_node(ScenarioNode::pool(pool.clone(), Default::default()).with_label("buffer"))?
+    .with_node(ScenarioNode::sink(sink.clone()))?
+    .with_edge(ScenarioEdge::resource(
+        EdgeId::fixture("source-pool"),
+        source.clone(),
+        pool.clone(),
+        TransferSpec::Fixed { amount: 1.0 },
+        ResourceConnection::default().with_token_size(NonZeroU64::new(1).unwrap()),
+    ))?
+    .with_edge(ScenarioEdge::resource(
+        EdgeId::fixture("pool-sink"),
+        pool.clone(),
+        sink,
+        TransferSpec::Remaining,
+        ResourceConnection::default(),
+    ))?
+    .with_edge(ScenarioEdge::state(
+        EdgeId::fixture("source-pool-state"),
+        source,
+        pool,
+        TransferSpec::Remaining,
+        StateConnection::new(StateConnectionRole::Modifier, "+1", StateTarget::Node),
+    ))?
+    .with_end_condition(EndConditionSpec::MaxSteps { steps: 2 })
+    .with_tracked_metric(MetricKey::fixture("sink"))
+    .with_metadata("owner", "docs")
+    .build()?;
+
+let compiled = Simulator::compile_checked(scenario)?;
+assert_eq!(compiled.source_spec().title.as_deref(), Some("Checked authoring"));
+let report = Simulator::run(&compiled, &RunConfig::for_seed(39)).unwrap();
+assert!(report.completed);
+# Ok::<(), anapao::error::SetupError>(())
+```
+
+The common `anapao::prelude` exports the checked scenario entrypoints. Individual family config
+types remain available from `anapao::types` when their defaults need customization.
 
 ---
 
@@ -107,6 +191,22 @@ let report = anapao::Simulator::run(&compiled, &run_config).unwrap();
 For checked conversion in generic code, use `let compiled: anapao::CompiledScenario =
 scenario.try_into()?;`. Read inspection data through `scenario_id()`, `source_spec()`,
 `node_ids()`, `edge_ids()`, `node_count()`, and `edge_count()`; raw execution modules are private.
+
+The legacy DTO route remains supported and its `with_node`/`with_edge` helpers keep
+last-write-wins replacement semantics. The checked `ScenarioBuilder` instead returns a stable
+error for duplicate node or edge IDs and retains the first definition.
+
+Version 0.2 intentionally rejects semantic combinations that older execution paths could repair
+or reinterpret:
+
+- a node or edge map key that differs from the embedded `id`;
+- an explicit node-family tag paired with another family's config payload;
+- a resource/state connection tag paired with an active payload for the other connection kind;
+- a node state target carrying a target connection ID; and
+- a resource-connection, state-connection, or formula target missing its required target ID.
+
+These checks happen after serde parsing. Raw JSON lexical duplicate keys are not detected at this
+boundary, and no stored-data backfill or second checked serde format is introduced.
 
 ---
 

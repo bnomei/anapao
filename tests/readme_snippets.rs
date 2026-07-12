@@ -1,8 +1,10 @@
 use std::fs;
 
 use anapao::types::{
-    AggregationConfig, BatchConfig, BatchRunTemplate, CaptureConfig, CaptureSchedule,
-    EndConditionSpec, ExecutionMode, MetricKey, RunConfig, ScenarioSpec, TransferSpec,
+    AggregationConfig, BatchConfig, BatchRunTemplate, CaptureConfig, CaptureSchedule, EdgeId,
+    EndConditionSpec, ExecutionMode, MetricKey, NodeId, ResourceConnection, RunConfig,
+    ScenarioBuilder, ScenarioEdge, ScenarioId, ScenarioNode, ScenarioSpec, StateConnection,
+    StateConnectionRole, StateTarget, TransferSpec,
 };
 use anapao::Simulator;
 
@@ -24,6 +26,63 @@ fn readme_s02_compile_scenario() {
 
     let compiled = Simulator::compile(scenario).expect("compile source_sink scenario");
     assert_eq!(compiled.scenario_id().as_str(), "scenario-source-sink");
+}
+
+#[test]
+fn readme_checked_authoring_compiles_runs_and_uses_opaque_accessors() {
+    let source = NodeId::fixture("source");
+    let pool = NodeId::fixture("pool");
+    let sink = NodeId::fixture("sink");
+    let scenario = ScenarioBuilder::new(ScenarioId::fixture("checked-authoring"))
+        .with_title("Checked authoring")
+        .with_description("resource and state flow")
+        .with_tag("docs")
+        .with_node(ScenarioNode::source(source.clone()).with_initial_value(2.0))
+        .expect("add source")
+        .with_node(ScenarioNode::pool(pool.clone(), Default::default()).with_label("buffer"))
+        .expect("add pool")
+        .with_node(ScenarioNode::sink(sink.clone()))
+        .expect("add sink")
+        .with_edge(ScenarioEdge::resource(
+            EdgeId::fixture("source-pool"),
+            source.clone(),
+            pool.clone(),
+            TransferSpec::Fixed { amount: 1.0 },
+            ResourceConnection::default(),
+        ))
+        .expect("add source resource edge")
+        .with_edge(ScenarioEdge::resource(
+            EdgeId::fixture("pool-sink"),
+            pool.clone(),
+            sink,
+            TransferSpec::Remaining,
+            ResourceConnection::default(),
+        ))
+        .expect("add sink resource edge")
+        .with_edge(ScenarioEdge::state(
+            EdgeId::fixture("source-pool-state"),
+            source,
+            pool,
+            TransferSpec::Remaining,
+            StateConnection::new(StateConnectionRole::Modifier, "+1", StateTarget::Node),
+        ))
+        .expect("add state edge")
+        .with_end_condition(EndConditionSpec::MaxSteps { steps: 2 })
+        .with_tracked_metric(MetricKey::fixture("sink"))
+        .with_metadata("owner", "docs")
+        .build()
+        .expect("checked scenario builds");
+
+    let compiled = Simulator::compile_checked(scenario).expect("checked scenario compiles");
+    assert_eq!(compiled.scenario_id().as_str(), "checked-authoring");
+    assert_eq!(compiled.source_spec().title.as_deref(), Some("Checked authoring"));
+    assert_eq!(compiled.node_count(), 3);
+    assert_eq!(compiled.edge_count(), 3);
+    assert_eq!(compiled.node_ids().len(), 3);
+    assert_eq!(compiled.edge_ids().len(), 3);
+
+    let report = Simulator::run(&compiled, &RunConfig::for_seed(39)).expect("scenario runs");
+    assert!(report.completed);
 }
 
 #[test]
@@ -84,6 +143,12 @@ fn readme_contains_curated_builder_snippet_signatures() {
     let readme = fs::read_to_string(&path).expect("read README");
 
     for needle in [
+        "## Scenario Representations and the Validation Boundary",
+        "let checked = Scenario::try_from(dto).unwrap();",
+        "let scenario = ScenarioBuilder::new(ScenarioId::fixture(\"checked-authoring\"))",
+        "let compiled = Simulator::compile_checked(scenario)?;",
+        "assert_eq!(compiled.source_spec().title.as_deref(), Some(\"Checked authoring\"));",
+        "Raw JSON lexical duplicate keys are not detected",
         "### Snippet S01 — Build a Minimal Scenario",
         "let mut scenario = ScenarioSpec::source_sink(TransferSpec::Fixed { amount: 1.0 })",
         "### Snippet S02 — Compile a Scenario",
