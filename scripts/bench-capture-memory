@@ -12,12 +12,22 @@ usage() {
 Usage:
   ./scripts/bench-capture-memory save --baseline NAME
   ./scripts/bench-capture-memory compare --baseline NAME
+  ./scripts/bench-capture-memory archive --baseline NAME --snapshot-dir PATH
+  ./scripts/bench-capture-memory restore --baseline NAME --snapshot-dir PATH
 
 Runs each fixed DHAT case in a separate process and writes machine-readable
 evidence beneath target/capture-memory/. `compare` prints absolute and relative
 peak-live-heap deltas without applying a pass/fail performance threshold.
 Use `save --baseline NAME --case CASE_ID` only to resume an interrupted capture;
 metadata is written once all fixed cases are present.
+
+`archive` preserves a saved forward baseline as a tracked snapshot. It is only
+valid for comparisons with future same-workload changes, never as historical
+before/after evidence.
+
+`restore` verifies a tracked snapshot manifest and its forward-only provenance
+before restoring its evidence beneath target/capture-memory/. It refuses to
+overwrite an existing local baseline.
 USAGE
 }
 
@@ -96,6 +106,8 @@ import sys
 path, baseline, host, rustc_vv = sys.argv[1:]
 pathlib.Path(path).write_text(json.dumps({
     "baseline": baseline,
+    "evidence_kind": "forward_baseline",
+    "evidence_schema_version": 1,
     "cases": ["single_full_256", "batch_none_256x256", "batch_all_256x256"],
     "features": "default",
     "host": host,
@@ -125,9 +137,17 @@ if not isinstance(metadata, dict):
     raise SystemExit(f"invalid evidence metadata in {directory}: expected object")
 if metadata.get("cases") != list(case_ids):
     raise SystemExit(f"invalid evidence metadata in {directory}: fixed case IDs are required")
-for field in ("baseline", "features", "host", "rustc_vv"):
+for field in ("baseline", "evidence_kind", "features", "host", "rustc_vv"):
     if not isinstance(metadata.get(field), str) or not metadata[field]:
         raise SystemExit(f"invalid evidence metadata in {directory}: missing {field}")
+if metadata["evidence_kind"] != "forward_baseline":
+    raise SystemExit(
+        f"invalid evidence metadata in {directory}: evidence_kind must be forward_baseline"
+    )
+if metadata.get("evidence_schema_version") != 1:
+    raise SystemExit(
+        f"invalid evidence metadata in {directory}: unsupported evidence schema version"
+    )
 
 for case_id in case_ids:
     path = directory / f"{case_id}.json"
@@ -153,7 +173,7 @@ PY
 save() {
   local baseline="$1"
   local selected_case="${2:-}"
-  local directory="target/capture-memory/$baseline"
+  local directory="${CARGO_TARGET_DIR:-target}/capture-memory/$baseline"
   mkdir -p "$directory"
   local -a cases=("${CASE_IDS[@]}")
   if [[ -n "$selected_case" ]]; then
@@ -174,10 +194,10 @@ save() {
 
 compare() {
   local baseline="$1"
-  local baseline_directory="target/capture-memory/$baseline"
+  local baseline_directory="${CARGO_TARGET_DIR:-target}/capture-memory/$baseline"
   validate_persisted_evidence "$baseline_directory"
 
-  local candidate_directory="target/capture-memory/compare-$baseline-$(date +%Y%m%d-%H%M%S)"
+  local candidate_directory="${CARGO_TARGET_DIR:-target}/capture-memory/compare-$baseline-$(date +%Y%m%d-%H%M%S)"
   mkdir -p "$candidate_directory"
   for case_id in "${CASE_IDS[@]}"; do
     echo "case: $case_id"
@@ -200,6 +220,10 @@ if baseline_meta["cases"] != candidate_meta["cases"]:
     raise SystemExit("incomparable evidence: case IDs differ")
 if baseline_meta["features"] != candidate_meta["features"]:
     raise SystemExit("incomparable evidence: feature sets differ")
+if baseline_meta["host"] != candidate_meta["host"]:
+    raise SystemExit("incomparable evidence: host metadata differs")
+if baseline_meta["rustc_vv"] != candidate_meta["rustc_vv"]:
+    raise SystemExit("incomparable evidence: rustc toolchain metadata differs")
 
 rows = []
 for case_id in baseline_meta["cases"]:
@@ -223,21 +247,128 @@ for case_id in baseline_meta["cases"]:
 report = {
     "baseline_directory": str(baseline_dir),
     "candidate_directory": str(candidate_dir),
+    "host": candidate_meta["host"],
+    "rustc_vv": candidate_meta["rustc_vv"],
     "cases": rows,
 }
+
 report_path = candidate_dir / "comparison.json"
 report_path.write_text(json.dumps(report, sort_keys=True) + "\n")
 print(json.dumps(report, sort_keys=True))
 PY
 }
 
+archive() {
+  local baseline="$1"
+  local snapshot_dir="$2"
+  local source_directory="${CARGO_TARGET_DIR:-target}/capture-memory/$baseline"
+  validate_persisted_evidence "$source_directory"
+  [[ ! -e "$snapshot_dir" ]] || die "cannot archive DHAT baseline: destination exists: $snapshot_dir"
+
+  mkdir -p "$snapshot_dir/evidence"
+  cp "$source_directory/metadata.json" "$snapshot_dir/evidence/"
+  local case_id
+  for case_id in "${CASE_IDS[@]}"; do
+    cp "$source_directory/$case_id.json" "$snapshot_dir/evidence/"
+  done
+  UV_CACHE_DIR="${UV_CACHE_DIR:-target/.uv-cache}" uv run --no-project python - \
+    "$snapshot_dir/provenance.json" "$baseline" "$source_directory/metadata.json" <<'PY'
+import json
+import pathlib
+import sys
+
+path, baseline, metadata_path = map(pathlib.Path, sys.argv[1:])
+metadata = json.loads(metadata_path.read_text())
+if metadata.get("evidence_kind") != "forward_baseline":
+    raise SystemExit("cannot archive DHAT evidence that is not a forward baseline")
+
+path.write_text(json.dumps({
+    "baseline": str(baseline),
+    "evidence_kind": "forward_baseline",
+    "historical_before_after": "unavailable",
+    "purpose": "future same-workload comparisons only",
+    "source_metadata": metadata,
+    "snapshot_schema_version": 1,
+}, sort_keys=True) + "\n")
+PY
+  (
+    cd "$snapshot_dir"
+    find . -type f ! -name SHA256SUMS -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256
+  ) > "$snapshot_dir/SHA256SUMS"
+  echo "archived: $snapshot_dir"
+}
+
+verify_snapshot() {
+  local baseline="$1"
+  local snapshot_dir="$2"
+  [[ -d "$snapshot_dir" ]] || die "cannot restore DHAT baseline: missing snapshot directory: $snapshot_dir"
+  [[ -f "$snapshot_dir/SHA256SUMS" ]] || \
+    die "cannot restore DHAT baseline: missing $snapshot_dir/SHA256SUMS"
+  [[ -f "$snapshot_dir/provenance.json" ]] || \
+    die "cannot restore DHAT baseline: missing $snapshot_dir/provenance.json"
+  [[ -f "$snapshot_dir/evidence/metadata.json" ]] || \
+    die "cannot restore DHAT baseline: missing $snapshot_dir/evidence/metadata.json"
+
+  (
+    cd "$snapshot_dir"
+    shasum -a 256 -c SHA256SUMS
+  )
+
+  UV_CACHE_DIR="${UV_CACHE_DIR:-target/.uv-cache}" uv run --no-project python - \
+    "$snapshot_dir/provenance.json" "$snapshot_dir/evidence/metadata.json" "$baseline" <<'PY'
+import json
+import pathlib
+import sys
+
+provenance_path, metadata_path, expected_baseline = map(pathlib.Path, sys.argv[1:])
+try:
+    provenance = json.loads(provenance_path.read_text())
+    metadata = json.loads(metadata_path.read_text())
+except (OSError, json.JSONDecodeError) as error:
+    raise SystemExit(f"invalid DHAT snapshot metadata: {error}")
+
+if provenance.get("snapshot_schema_version") != 1:
+    raise SystemExit("invalid DHAT snapshot provenance: unsupported schema version")
+if provenance.get("baseline") != str(expected_baseline):
+    raise SystemExit("invalid DHAT snapshot provenance: baseline differs")
+if provenance.get("evidence_kind") != "forward_baseline":
+    raise SystemExit("invalid DHAT snapshot provenance: not a forward baseline")
+if provenance.get("historical_before_after") != "unavailable":
+    raise SystemExit("invalid DHAT snapshot provenance: historical status is required")
+if provenance.get("purpose") != "future same-workload comparisons only":
+    raise SystemExit("invalid DHAT snapshot provenance: future-comparison purpose is required")
+if provenance.get("source_metadata") != metadata:
+    raise SystemExit("invalid DHAT snapshot provenance: source metadata differs")
+if metadata.get("baseline") != str(expected_baseline):
+    raise SystemExit("invalid DHAT snapshot metadata: baseline differs")
+if metadata.get("evidence_kind") != "forward_baseline":
+    raise SystemExit("invalid DHAT snapshot metadata: not a forward baseline")
+if metadata.get("evidence_schema_version") != 1:
+    raise SystemExit("invalid DHAT snapshot metadata: unsupported evidence schema version")
+PY
+  validate_persisted_evidence "$snapshot_dir/evidence"
+}
+
+restore() {
+  local baseline="$1"
+  local snapshot_dir="$2"
+  local target_directory="${CARGO_TARGET_DIR:-target}/capture-memory/$baseline"
+  verify_snapshot "$baseline" "$snapshot_dir"
+  [[ ! -e "$target_directory" ]] || \
+    die "cannot restore DHAT baseline: destination exists: $target_directory"
+  mkdir -p "$(dirname "$target_directory")"
+  cp -R "$snapshot_dir/evidence" "$target_directory"
+  echo "restored: $target_directory (forward-only baseline: $baseline)"
+}
+
 main() {
   require_uv
   local command="${1:-}"
-  [[ "$command" == "save" || "$command" == "compare" ]] || { usage >&2; exit 2; }
+  [[ "$command" == "save" || "$command" == "compare" || "$command" == "archive" || "$command" == "restore" ]] || { usage >&2; exit 2; }
   shift
   local baseline=""
   local case_id=""
+  local snapshot_dir=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --baseline)
@@ -248,6 +379,11 @@ main() {
       --case)
         [[ "$command" == "save" && -n "${2:-}" ]] || die "--case is valid only for save"
         case_id="$2"
+        shift 2
+        ;;
+      --snapshot-dir)
+        [[ -n "${2:-}" ]] || die "--snapshot-dir requires PATH"
+        snapshot_dir="$2"
         shift 2
         ;;
       *)
@@ -262,8 +398,14 @@ main() {
   fi
   if [[ "$command" == "save" ]]; then
     save "$baseline" "$case_id"
-  else
+  elif [[ "$command" == "compare" ]]; then
     compare "$baseline"
+  elif [[ "$command" == "archive" ]]; then
+    [[ -n "$snapshot_dir" ]] || die "archive requires --snapshot-dir PATH"
+    archive "$baseline" "$snapshot_dir"
+  else
+    [[ -n "$snapshot_dir" ]] || die "restore requires --snapshot-dir PATH"
+    restore "$baseline" "$snapshot_dir"
   fi
 }
 

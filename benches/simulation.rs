@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::hint::black_box;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -107,9 +108,40 @@ fn checksum_batch_report(report: &BatchReport) -> u64 {
         acc = acc.wrapping_mul(131).wrapping_add(run.seed);
         acc = acc.wrapping_mul(131).wrapping_add(run.steps_executed);
         acc = acc.wrapping_mul(131).wrapping_add(run.completed as u64);
+        for value in run.final_metrics.values() {
+            acc = acc.wrapping_mul(131).wrapping_add(value.to_bits());
+        }
+    }
+
+    for table in report.aggregate_series.values() {
+        for point in &table.points {
+            acc = acc.wrapping_mul(131).wrapping_add(point.step);
+            acc = acc.wrapping_mul(131).wrapping_add(point.value.to_bits());
+        }
     }
 
     acc
+}
+
+/// Records the consumed checksum for the retention-sensitive Criterion cases.
+///
+/// The evidence path is opt-in so normal Criterion measurements do not perform
+/// an extra simulation. `scripts/bench-criterion` enables it for named
+/// baseline saves and comparisons, where an otherwise silent result mismatch
+/// must make the evidence incomparable.
+fn record_criterion_checksum(case_id: &str, compute: impl FnOnce() -> u64) {
+    let Ok(path) = std::env::var("ANAPAO_CRITERION_EVIDENCE") else {
+        return;
+    };
+
+    let checksum = compute();
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .expect("open Criterion evidence output");
+    writeln!(file, "{}", serde_json::json!({ "case_id": case_id, "checksum": checksum }))
+        .expect("write Criterion evidence output");
 }
 
 fn checksum_written_artifacts(output_dir: &Path, manifest: &ManifestRef) -> u64 {
@@ -456,6 +488,11 @@ fn benches_simulation_guardrails(c: &mut Criterion) {
         .with_base_seed(0x000A_11CE_55ED_u64)
         .with_max_steps(256)
         .with_aggregation(AggregationConfig::default());
+    record_criterion_checksum("simulation.guardrails/batch_aggregation_all_single_thread", || {
+        let report = Simulator::run_batch(&compiled_aggregation_all, &aggregation_all)
+            .expect("record aggregation-all checksum");
+        checksum_batch_report(&report)
+    });
     group.bench_function("batch_aggregation_all_single_thread", move |b| {
         b.iter(|| {
             let report = Simulator::run_batch(
@@ -473,6 +510,11 @@ fn benches_simulation_guardrails(c: &mut Criterion) {
         .with_base_seed(0x000A_11CE_55ED_u64)
         .with_max_steps(256)
         .with_aggregation(AggregationConfig::none());
+    record_criterion_checksum("simulation.guardrails/batch_aggregation_none_single_thread", || {
+        let report = Simulator::run_batch(&compiled_aggregation_none, &aggregation_none)
+            .expect("record aggregation-none checksum");
+        checksum_batch_report(&report)
+    });
     group.bench_function("batch_aggregation_none_single_thread", move |b| {
         b.iter(|| {
             let report = Simulator::run_batch(
@@ -513,6 +555,12 @@ fn benches_simulation_guardrails(c: &mut Criterion) {
             .with_max_steps(256)
             .with_execution_mode(ExecutionMode::Rayon)
             .with_aggregation(AggregationConfig::default());
+        record_criterion_checksum("simulation.guardrails/batch_aggregation_all_rayon", || {
+            let report =
+                Simulator::run_batch(&compiled_aggregation_all_rayon, &aggregation_all_rayon)
+                    .expect("record Rayon aggregation-all checksum");
+            checksum_batch_report(&report)
+        });
         group.bench_function("batch_aggregation_all_rayon", move |b| {
             b.iter(|| {
                 let report = Simulator::run_batch(
@@ -531,6 +579,12 @@ fn benches_simulation_guardrails(c: &mut Criterion) {
             .with_max_steps(256)
             .with_execution_mode(ExecutionMode::Rayon)
             .with_aggregation(AggregationConfig::none());
+        record_criterion_checksum("simulation.guardrails/batch_aggregation_none_rayon", || {
+            let report =
+                Simulator::run_batch(&compiled_aggregation_none_rayon, &aggregation_none_rayon)
+                    .expect("record Rayon aggregation-none checksum");
+            checksum_batch_report(&report)
+        });
         group.bench_function("batch_aggregation_none_rayon", move |b| {
             b.iter(|| {
                 let report = Simulator::run_batch(

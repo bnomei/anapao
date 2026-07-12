@@ -10,6 +10,8 @@ Usage:
   ./scripts/bench-criterion save [options] [--baseline NAME] [-- <criterion args...>]
   ./scripts/bench-criterion compare [options] --baseline NAME [-- <criterion args...>]
   ./scripts/bench-criterion summary [options] --baseline NAME [--threshold DELTA] [-- <criterion args...>]
+  ./scripts/bench-criterion archive [options] --baseline NAME --snapshot-dir PATH
+  ./scripts/bench-criterion restore [options] --baseline NAME --snapshot-dir PATH
   ./scripts/bench-criterion name
 
 Commands:
@@ -17,6 +19,8 @@ Commands:
   save      Run benches and save a Criterion baseline.
   compare   Run benches and compare against a saved baseline.
   summary   Run compare, then print a non-failing regression summary.
+  archive   Copy a saved forward baseline and its evidence into a tracked snapshot.
+  restore   Verify a tracked forward snapshot and restore it beneath target/.
   name      Print the default baseline name (branch-date-sha).
 
 Options:
@@ -29,12 +33,21 @@ Options:
   --manifest-path PATH      Pass through to cargo.
   --profile PROFILE         Pass through to cargo.
   --baseline NAME           Baseline name (for save/compare).
+  --snapshot-dir PATH       Snapshot source/destination (required for archive/restore).
   --threshold DELTA         Summary threshold as relative delta (default: 0.07 = +7%).
   -h, --help                Show this help.
 
 Notes:
   - Criterion baselines live under target/criterion/*/<baseline>/.
+  - Named save/compare runs record retention-case checksums plus feature, host,
+    and Rust toolchain metadata under target/criterion-evidence/.
   - Additional Criterion CLI args can be passed after '--' (if you use them).
+  - `archive` preserves the Criterion result data, workload checksums, and
+    provenance metadata. Archived forward baselines compare only future changes;
+    they do not establish a historical before/after result.
+  - `restore` verifies an archive's SHA-256 manifest and forward-only provenance
+    before copying it beneath target/. It refuses to overwrite an existing local
+    baseline, then use `compare` normally.
 USAGE
 }
 
@@ -178,6 +191,239 @@ clear_change_estimates() {
   fi
 }
 
+write_criterion_evidence_metadata() {
+  local directory="$1"
+  local baseline="$2"
+  local features="$3"
+  local evidence_file="$directory/checksums.jsonl"
+  [[ -s "$evidence_file" ]] || return 0
+
+  UV_CACHE_DIR="${UV_CACHE_DIR:-target/.uv-cache}" uv run --no-project python - \
+    "$directory/metadata.json" "$evidence_file" "$baseline" "$features" "$(uname -a)" "$(rustc -Vv)" <<'PY'
+import json
+import pathlib
+import sys
+
+metadata_path, evidence_path, baseline, features, host, rustc_vv = sys.argv[1:]
+records_by_case = {}
+for line in pathlib.Path(evidence_path).read_text().splitlines():
+    record = json.loads(line)
+    if not isinstance(record.get("case_id"), str) or not record["case_id"]:
+        raise SystemExit(f"invalid Criterion checksum record: {record}")
+    if type(record.get("checksum")) is not int or record["checksum"] < 0:
+        raise SystemExit(f"invalid Criterion checksum record: {record}")
+    previous = records_by_case.setdefault(record["case_id"], record)
+    if previous["checksum"] != record["checksum"]:
+        raise SystemExit(
+            "invalid Criterion checksum evidence: "
+            f"case {record['case_id']} produced inconsistent checksums"
+        )
+
+records = sorted(records_by_case.values(), key=lambda record: record["case_id"])
+
+pathlib.Path(metadata_path).write_text(json.dumps({
+    "baseline": baseline,
+    "evidence_kind": "forward_baseline",
+    "evidence_schema_version": 1,
+    "features": features,
+    "host": host,
+    "rustc_vv": rustc_vv,
+    "records": records,
+}, sort_keys=True) + "\n")
+PY
+}
+
+compare_criterion_evidence() {
+  local baseline="$1"
+  local candidate="$2"
+  UV_CACHE_DIR="${UV_CACHE_DIR:-target/.uv-cache}" uv run --no-project python - \
+    "$baseline/metadata.json" "$candidate/metadata.json" <<'PY'
+import json
+import pathlib
+import sys
+
+baseline_path, candidate_path = map(pathlib.Path, sys.argv[1:])
+try:
+    before = json.loads(baseline_path.read_text())
+    after = json.loads(candidate_path.read_text())
+except (OSError, json.JSONDecodeError) as error:
+    raise SystemExit(f"incomparable Criterion evidence: {error}")
+
+for field in ("evidence_kind", "evidence_schema_version", "features", "host", "rustc_vv"):
+    if before.get(field) != after.get(field):
+        raise SystemExit(f"incomparable Criterion evidence: {field} differs")
+if before["evidence_kind"] != "forward_baseline":
+    raise SystemExit("incomparable Criterion evidence: baseline is not a forward baseline")
+
+before_records = before.get("records")
+after_records = after.get("records")
+if not isinstance(before_records, list) or not isinstance(after_records, list):
+    raise SystemExit("incomparable Criterion evidence: missing checksum records")
+if before_records != after_records:
+    raise SystemExit("incomparable Criterion evidence: workload checksum records differ")
+
+print(json.dumps({
+    "baseline": str(baseline_path.parent),
+    "candidate": str(candidate_path.parent),
+    "features": after["features"],
+    "host": after["host"],
+    "rustc_vv": after["rustc_vv"],
+    "records": after_records,
+}, sort_keys=True))
+PY
+}
+
+archive_criterion_baseline() {
+  local baseline="$1"
+  local snapshot_dir="$2"
+  local target_root="${CARGO_TARGET_DIR:-target}"
+  local evidence_directory="$target_root/criterion-evidence/$baseline"
+  local criterion_root="$target_root/criterion"
+
+  [[ -f "$evidence_directory/metadata.json" ]] || \
+    die "cannot archive Criterion evidence: missing $evidence_directory/metadata.json"
+  [[ -d "$criterion_root" ]] || die "cannot archive Criterion baseline: missing $criterion_root"
+  [[ ! -e "$snapshot_dir" ]] || die "cannot archive Criterion baseline: destination exists: $snapshot_dir"
+
+  local -a baseline_dirs=()
+  local directory
+  while IFS= read -r -d '' directory; do
+    baseline_dirs+=("$directory")
+  done < <(find "$criterion_root" -type d -name "$baseline" -print0)
+  [[ ${#baseline_dirs[@]} -gt 0 ]] || \
+    die "cannot archive Criterion baseline: no saved cases named $baseline"
+
+  mkdir -p "$snapshot_dir/criterion" "$snapshot_dir/evidence"
+  cp "$evidence_directory/metadata.json" "$evidence_directory/checksums.jsonl" "$snapshot_dir/evidence/"
+  for directory in "${baseline_dirs[@]}"; do
+    local relative="${directory#"$criterion_root"/}"
+    local destination="$snapshot_dir/criterion/$relative"
+    mkdir -p "$(dirname "$destination")"
+    cp -R "$directory" "$destination"
+  done
+
+  UV_CACHE_DIR="${UV_CACHE_DIR:-target/.uv-cache}" uv run --no-project python - \
+    "$snapshot_dir/provenance.json" "$baseline" "$evidence_directory/metadata.json" <<'PY'
+import json
+import pathlib
+import sys
+
+path, baseline, metadata_path = map(pathlib.Path, sys.argv[1:])
+metadata = json.loads(metadata_path.read_text())
+if metadata.get("evidence_kind") != "forward_baseline":
+    raise SystemExit("cannot archive Criterion evidence that is not a forward baseline")
+
+path.write_text(json.dumps({
+    "baseline": str(baseline),
+    "evidence_kind": "forward_baseline",
+    "historical_before_after": "unavailable",
+    "purpose": "future same-workload comparisons only",
+    "source_metadata": metadata,
+    "snapshot_schema_version": 1,
+}, sort_keys=True) + "\n")
+PY
+  (
+    cd "$snapshot_dir"
+    find . -type f ! -name SHA256SUMS -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256
+  ) > "$snapshot_dir/SHA256SUMS"
+  echo "archived: $snapshot_dir"
+}
+
+verify_criterion_snapshot() {
+  local baseline="$1"
+  local snapshot_dir="$2"
+  local expected_features="$3"
+  [[ -d "$snapshot_dir" ]] || die "cannot restore Criterion baseline: missing snapshot directory: $snapshot_dir"
+  [[ -f "$snapshot_dir/SHA256SUMS" ]] || \
+    die "cannot restore Criterion baseline: missing $snapshot_dir/SHA256SUMS"
+  [[ -f "$snapshot_dir/provenance.json" ]] || \
+    die "cannot restore Criterion baseline: missing $snapshot_dir/provenance.json"
+  [[ -f "$snapshot_dir/evidence/metadata.json" ]] || \
+    die "cannot restore Criterion baseline: missing $snapshot_dir/evidence/metadata.json"
+
+  (
+    cd "$snapshot_dir"
+    shasum -a 256 -c SHA256SUMS
+  )
+
+  UV_CACHE_DIR="${UV_CACHE_DIR:-target/.uv-cache}" uv run --no-project python - \
+    "$snapshot_dir/provenance.json" "$snapshot_dir/evidence/metadata.json" "$baseline" "$expected_features" <<'PY'
+import json
+import pathlib
+import sys
+
+provenance_path, metadata_path, expected_baseline, expected_features = map(pathlib.Path, sys.argv[1:])
+try:
+    provenance = json.loads(provenance_path.read_text())
+    metadata = json.loads(metadata_path.read_text())
+except (OSError, json.JSONDecodeError) as error:
+    raise SystemExit(f"invalid Criterion snapshot metadata: {error}")
+
+if provenance.get("snapshot_schema_version") != 1:
+    raise SystemExit("invalid Criterion snapshot provenance: unsupported schema version")
+if provenance.get("baseline") != str(expected_baseline):
+    raise SystemExit("invalid Criterion snapshot provenance: baseline differs")
+if provenance.get("evidence_kind") != "forward_baseline":
+    raise SystemExit("invalid Criterion snapshot provenance: not a forward baseline")
+if provenance.get("historical_before_after") != "unavailable":
+    raise SystemExit("invalid Criterion snapshot provenance: historical status is required")
+if provenance.get("purpose") != "future same-workload comparisons only":
+    raise SystemExit("invalid Criterion snapshot provenance: future-comparison purpose is required")
+if provenance.get("source_metadata") != metadata:
+    raise SystemExit("invalid Criterion snapshot provenance: source metadata differs")
+if metadata.get("baseline") != str(expected_baseline):
+    raise SystemExit("invalid Criterion snapshot metadata: baseline differs")
+if metadata.get("features") != str(expected_features):
+    raise SystemExit("invalid Criterion snapshot metadata: feature set differs")
+if metadata.get("evidence_kind") != "forward_baseline":
+    raise SystemExit("invalid Criterion snapshot metadata: not a forward baseline")
+if metadata.get("evidence_schema_version") != 1:
+    raise SystemExit("invalid Criterion snapshot metadata: unsupported evidence schema version")
+PY
+}
+
+restore_criterion_baseline() {
+  local baseline="$1"
+  local snapshot_dir="$2"
+  local expected_features="$3"
+  local target_root="${CARGO_TARGET_DIR:-target}"
+  local snapshot_criterion_root="$snapshot_dir/criterion"
+  local target_evidence_directory="$target_root/criterion-evidence/$baseline"
+
+  verify_criterion_snapshot "$baseline" "$snapshot_dir" "$expected_features"
+  [[ -f "$snapshot_dir/evidence/checksums.jsonl" ]] || \
+    die "cannot restore Criterion baseline: missing $snapshot_dir/evidence/checksums.jsonl"
+  [[ -d "$snapshot_criterion_root" ]] || \
+    die "cannot restore Criterion baseline: missing $snapshot_criterion_root"
+  [[ ! -e "$target_evidence_directory" ]] || \
+    die "cannot restore Criterion baseline: destination exists: $target_evidence_directory"
+
+  local -a baseline_dirs=()
+  local directory
+  while IFS= read -r -d '' directory; do
+    baseline_dirs+=("$directory")
+  done < <(find "$snapshot_criterion_root" -type d -name "$baseline" -print0)
+  [[ ${#baseline_dirs[@]} -gt 0 ]] || \
+    die "cannot restore Criterion baseline: no saved cases named $baseline"
+
+  for directory in "${baseline_dirs[@]}"; do
+    local relative="${directory#"$snapshot_criterion_root"/}"
+    local destination="$target_root/criterion/$relative"
+    [[ ! -e "$destination" ]] || \
+      die "cannot restore Criterion baseline: destination exists: $destination"
+  done
+
+  mkdir -p "$(dirname "$target_evidence_directory")"
+  cp -R "$snapshot_dir/evidence" "$target_evidence_directory"
+  for directory in "${baseline_dirs[@]}"; do
+    local relative="${directory#"$snapshot_criterion_root"/}"
+    local destination="$target_root/criterion/$relative"
+    mkdir -p "$(dirname "$destination")"
+    cp -R "$directory" "$destination"
+  done
+  echo "restored: $target_root (forward-only baseline: $baseline)"
+}
+
 main() {
   local cmd="${1:-}"
   if [[ -z "$cmd" || "$cmd" == "help" || "$cmd" == "-h" || "$cmd" == "--help" ]]; then
@@ -191,6 +437,8 @@ main() {
   local has_bench_target_filter="false"
   local manifest_path="Cargo.toml"
   local threshold="0.07"
+  local evidence_features="default"
+  local snapshot_dir=""
   local -a cargo_args=()
   local -a criterion_args=()
 
@@ -215,10 +463,12 @@ main() {
       --features)
         [[ $# -ge 2 ]] || die "--features requires a value"
         cargo_args+=("--features" "$2")
+        evidence_features="$2"
         shift 2
         ;;
       --all-features|--no-default-features)
         cargo_args+=("$1")
+        evidence_features="$1"
         shift
         ;;
       --manifest-path|--profile)
@@ -237,6 +487,11 @@ main() {
       --threshold)
         [[ $# -ge 2 ]] || die "--threshold requires a value"
         threshold="$2"
+        shift 2
+        ;;
+      --snapshot-dir)
+        [[ $# -ge 2 ]] || die "--snapshot-dir requires a value"
+        snapshot_dir="$2"
         shift 2
         ;;
       --)
@@ -284,7 +539,13 @@ main() {
       if [[ ${#criterion_args[@]} -gt 0 ]]; then
         bench_bin_args+=("${criterion_args[@]}")
       fi
-      exec cargo bench "${cargo_args[@]+${cargo_args[@]}}" -- "${bench_bin_args[@]}"
+      local evidence_directory="${CARGO_TARGET_DIR:-target}/criterion-evidence/$baseline"
+      mkdir -p "$evidence_directory"
+      : > "$evidence_directory/checksums.jsonl"
+      rm -f "$evidence_directory/metadata.json"
+      ANAPAO_CRITERION_EVIDENCE="$evidence_directory/checksums.jsonl" \
+        cargo bench "${cargo_args[@]+${cargo_args[@]}}" -- "${bench_bin_args[@]}"
+      write_criterion_evidence_metadata "$evidence_directory" "$baseline" "$evidence_features"
       ;;
     compare)
       ensure_bench_targets_selected
@@ -296,7 +557,17 @@ main() {
       if [[ ${#criterion_args[@]} -gt 0 ]]; then
         bench_bin_args+=("${criterion_args[@]}")
       fi
-      exec cargo bench "${cargo_args[@]+${cargo_args[@]}}" -- "${bench_bin_args[@]}"
+      local baseline_evidence_directory="${CARGO_TARGET_DIR:-target}/criterion-evidence/$baseline"
+      [[ -f "$baseline_evidence_directory/metadata.json" ]] || \
+        die "incomparable Criterion evidence: missing $baseline_evidence_directory/metadata.json"
+      local candidate_evidence_directory="${CARGO_TARGET_DIR:-target}/criterion-evidence/compare-$baseline-$(date +%Y%m%d-%H%M%S)"
+      mkdir -p "$candidate_evidence_directory"
+      : > "$candidate_evidence_directory/checksums.jsonl"
+      ANAPAO_CRITERION_EVIDENCE="$candidate_evidence_directory/checksums.jsonl" \
+        cargo bench "${cargo_args[@]+${cargo_args[@]}}" -- "${bench_bin_args[@]}"
+      write_criterion_evidence_metadata \
+        "$candidate_evidence_directory" "$baseline" "$evidence_features"
+      compare_criterion_evidence "$baseline_evidence_directory" "$candidate_evidence_directory"
       ;;
     summary)
       ensure_bench_targets_selected
@@ -311,6 +582,20 @@ main() {
       clear_change_estimates
       cargo bench "${cargo_args[@]+${cargo_args[@]}}" -- "${bench_bin_args[@]}"
       print_regression_summary "$threshold"
+      ;;
+    archive)
+      [[ -n "$baseline" ]] || die "archive requires --baseline NAME"
+      [[ -n "$snapshot_dir" ]] || die "archive requires --snapshot-dir PATH"
+      baseline="$(sanitize_baseline_name "$baseline")"
+      [[ -n "$baseline" ]] || die "--baseline resolved to an empty name"
+      archive_criterion_baseline "$baseline" "$snapshot_dir"
+      ;;
+    restore)
+      [[ -n "$baseline" ]] || die "restore requires --baseline NAME"
+      [[ -n "$snapshot_dir" ]] || die "restore requires --snapshot-dir PATH"
+      baseline="$(sanitize_baseline_name "$baseline")"
+      [[ -n "$baseline" ]] || die "--baseline resolved to an empty name"
+      restore_criterion_baseline "$baseline" "$snapshot_dir" "$evidence_features"
       ;;
     *)
       die "unknown command: $cmd"
