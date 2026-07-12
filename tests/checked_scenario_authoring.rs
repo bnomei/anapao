@@ -1,8 +1,13 @@
+use std::num::NonZeroU64;
+
 use anapao::error::SetupError;
 use anapao::types::{
-    CaptureConfig, EdgeId, EdgeSpec, EndConditionSpec, MetricKey, NodeId, NodeKind, NodeSpec,
-    ResourceConnection, RunConfig, Scenario, ScenarioBuilder, ScenarioEdge, ScenarioId,
-    ScenarioNode, ScenarioSpec, StateConnection, StateConnectionRole, StateTarget, TransferSpec,
+    CaptureConfig, ConverterConfig, DelayConfig, DrainConfig, EdgeId, EdgeSpec, EndConditionSpec,
+    MetricKey, MixedGateConfig, NodeId, NodeKind, NodeModeConfig, NodeSpec, PoolConfig,
+    QueueConfig, RegisterConfig, ResourceConnection, RunConfig, Scenario, ScenarioBuilder,
+    ScenarioEdge, ScenarioId, ScenarioNode, ScenarioSpec, SortingGateConfig, StateConnection,
+    StateConnectionRole, StateTarget, TraderConfig, TransferSpec, TriggerGateConfig,
+    VariableRuntimeConfig,
 };
 use anapao::{CompiledScenario, Simulator};
 use serde_json::Value;
@@ -21,6 +26,135 @@ fn assert_invalid_parameter_path(error: SetupError, expected: &str) {
         matches!(error, SetupError::InvalidParameter { ref name, .. } if name == expected),
         "expected invalid parameter at {expected}, got {error}"
     );
+}
+
+#[test]
+fn frozen_checked_authoring_surface_compiles_for_external_callers() {
+    let one = NonZeroU64::MIN;
+    let mode = NodeModeConfig::default();
+    let pool = PoolConfig::default()
+        .with_capacity(2)
+        .without_capacity()
+        .with_allow_negative_start(true)
+        .with_mode(mode.clone());
+    let drain = DrainConfig::default().with_mode(mode.clone());
+    let sorting = SortingGateConfig::default().with_mode(mode.clone());
+    let trigger = TriggerGateConfig::default().with_mode(mode.clone());
+    let mixed = MixedGateConfig::default().with_mode(mode.clone());
+    let converter =
+        ConverterConfig::default().with_ignore_disabled_inputs(true).with_mode(mode.clone());
+    let trader = TraderConfig::default().with_ignore_disabled_inputs(true).with_mode(mode.clone());
+    let register = RegisterConfig::default()
+        .with_interactive(true)
+        .with_min_value(-1)
+        .without_min_value()
+        .with_max_value(1)
+        .without_max_value();
+    let delay = DelayConfig::default().with_delay_steps(one).with_mode(mode.clone());
+    let queue = QueueConfig::default()
+        .with_capacity(one)
+        .without_capacity()
+        .with_release_per_step(one)
+        .with_mode(mode);
+
+    let nodes = [
+        ScenarioNode::source(NodeId::fixture("source")),
+        ScenarioNode::pool(NodeId::fixture("pool"), pool),
+        ScenarioNode::drain(NodeId::fixture("drain"), drain),
+        ScenarioNode::sorting_gate(NodeId::fixture("sorting"), sorting),
+        ScenarioNode::trigger_gate(NodeId::fixture("trigger"), trigger),
+        ScenarioNode::mixed_gate(NodeId::fixture("mixed"), mixed),
+        ScenarioNode::converter(NodeId::fixture("converter"), converter),
+        ScenarioNode::trader(NodeId::fixture("trader"), trader),
+        ScenarioNode::register(NodeId::fixture("register"), register),
+        ScenarioNode::delay(NodeId::fixture("delay"), delay),
+        ScenarioNode::queue(NodeId::fixture("queue"), queue),
+        ScenarioNode::process(NodeId::fixture("process")),
+        ScenarioNode::sink(NodeId::fixture("sink")),
+        ScenarioNode::gate(NodeId::fixture("gate")),
+        ScenarioNode::custom(NodeId::fixture("custom"), "family"),
+    ];
+    assert_eq!(nodes.len(), 15);
+
+    let authored = ScenarioNode::source(NodeId::fixture("authored"))
+        .with_label("label")
+        .with_initial_value(1.0)
+        .with_tag("tag")
+        .with_metadata("key", "value");
+    assert_eq!(authored.label(), Some("label"));
+
+    let resource = ScenarioEdge::resource(
+        EdgeId::fixture("resource"),
+        NodeId::fixture("source"),
+        NodeId::fixture("sink"),
+        TransferSpec::Remaining,
+        ResourceConnection::default().with_token_size(one),
+    )
+    .with_enabled(false)
+    .with_metadata("key", "value");
+    let state = ScenarioEdge::state(
+        EdgeId::fixture("state"),
+        NodeId::fixture("source"),
+        NodeId::fixture("sink"),
+        TransferSpec::Remaining,
+        StateConnection::default()
+            .with_role(StateConnectionRole::Modifier)
+            .with_formula("+1")
+            .with_target(StateTarget::Node)
+            .with_resource_filter("resource"),
+    );
+    let _state_from_new = ScenarioEdge::state(
+        EdgeId::fixture("state-new"),
+        NodeId::fixture("source"),
+        NodeId::fixture("sink"),
+        TransferSpec::Remaining,
+        StateConnection::new(
+            StateConnectionRole::Modifier,
+            "+1",
+            StateTarget::ResourceConnection(resource.id().clone()),
+        ),
+    );
+    assert!(!resource.enabled());
+    assert!(state.enabled());
+
+    let mut mutable = ScenarioBuilder::new(ScenarioId::fixture("mutable-surface"));
+    mutable.insert_node(ScenarioNode::process(NodeId::fixture("from"))).unwrap();
+    mutable.insert_node(ScenarioNode::sink(NodeId::fixture("to"))).unwrap();
+    mutable
+        .insert_edge(ScenarioEdge::resource(
+            EdgeId::fixture("from-to"),
+            NodeId::fixture("from"),
+            NodeId::fixture("to"),
+            TransferSpec::Remaining,
+            ResourceConnection::default(),
+        ))
+        .unwrap();
+    mutable.build().unwrap();
+
+    ScenarioBuilder::new(ScenarioId::fixture("consuming-surface"))
+        .with_title("title")
+        .with_description("description")
+        .with_tag("tag")
+        .with_variables(VariableRuntimeConfig::default())
+        .with_node(ScenarioNode::process(NodeId::fixture("from")))
+        .unwrap()
+        .with_node(ScenarioNode::sink(NodeId::fixture("to")))
+        .unwrap()
+        .with_edge(ScenarioEdge::resource(
+            EdgeId::fixture("from-to"),
+            NodeId::fixture("from"),
+            NodeId::fixture("to"),
+            TransferSpec::Remaining,
+            ResourceConnection::default(),
+        ))
+        .unwrap()
+        .with_end_condition(EndConditionSpec::MaxSteps { steps: 2 })
+        .with_end_conditions([EndConditionSpec::MaxSteps { steps: 2 }])
+        .push_end_condition(EndConditionSpec::MaxSteps { steps: 3 })
+        .with_tracked_metric(MetricKey::fixture("to"))
+        .with_metadata("key", "value")
+        .build()
+        .unwrap();
 }
 
 #[test]
