@@ -1,0 +1,7 @@
+error: anapao::scenario!: unknown node family
+ --> tests/ui/scenario_macro/fail/unknown_family.rs:2:13
+  |
+2 |     let _ = anapao::scenario! { id: "bad"; nodes { node: Mystery; } edges {} };
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the macro `$crate::scenario` which comes from the expansion of the macro `anapao::scenario` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -1,0 +1,7 @@
+error: anapao::scenario!: expected canonical id/fields/nodes/edges/track/end order
+ --> tests/ui/scenario_macro/fail/unexpected_top_level.rs:2:13
+  |
+2 |     let _ = anapao::scenario! { id: "bad"; surprise: true; nodes {} edges {} };
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the macro `anapao::scenario` (in Nightly builds, run with -Z macro-backtrace for more info)

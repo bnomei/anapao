@@ -1,0 +1,7 @@
+error: anapao::scenario!: unknown, duplicate, or malformed state connection property
+ --> tests/ui/scenario_macro/fail/malformed_state_target.rs:2:13
+  |
+2 | ... = anapao::scenario! { id: "bad"; nodes { a: Source; b: Sink; } edges { flow: a -> b => remaining state { target: resource_connection("flow") }; } };
+  |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the macro `$crate::scenario` which comes from the expansion of the macro `anapao::scenario` (in Nightly builds, run with -Z macro-backtrace for more info)

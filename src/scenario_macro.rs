@@ -630,8 +630,15 @@ macro_rules! scenario {
     // Duplicate/exclusivity checks. Native fields all share the config exclusion check, while
     // the per-field scanner emits compile-time diagnostics for duplicates.
     (@__anapao_native_guard $field:ident [$($seen:ident)*]) => {
-        $crate::scenario!(@__anapao_assert_config [$($seen)*]);
+        $crate::scenario!(@__anapao_assert_no_typed_config [$($seen)*]);
         $crate::scenario!(@__anapao_assert_field $field [$($seen)*]);
+    };
+    (@__anapao_assert_no_typed_config []) => {};
+    (@__anapao_assert_no_typed_config [config $($rest:ident)*]) => {
+        ::std::compile_error!("anapao::scenario!: typed config cannot be mixed with native config fields")
+    };
+    (@__anapao_assert_no_typed_config [$head:ident $($rest:ident)*]) => {
+        $crate::scenario!(@__anapao_assert_no_typed_config [$($rest)*])
     };
     (@__anapao_assert_no_native_config []) => {};
     (@__anapao_assert_no_native_config [label $($rest:ident)*]) => {

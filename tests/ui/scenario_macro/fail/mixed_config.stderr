@@ -1,0 +1,7 @@
+error: anapao::scenario!: typed config cannot be mixed with native config fields
+ --> tests/ui/scenario_macro/fail/mixed_config.rs:2:13
+  |
+2 | ... = anapao::scenario! { id: "bad"; nodes { node: Pool { config: anapao::types::PoolConfig::default(), capacity: 1 }; } edges {} };
+  |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the macro `$crate::scenario` which comes from the expansion of the macro `anapao::scenario` (in Nightly builds, run with -Z macro-backtrace for more info)
