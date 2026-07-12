@@ -1,0 +1,54 @@
+{
+  "id": "legacy-state-aliases",
+  "title": null,
+  "description": null,
+  "tags": [],
+  "nodes": {
+    "process": {
+      "id": "process",
+      "kind": "process",
+      "label": null,
+      "initial_value": 2.0,
+      "tags": [],
+      "metadata": {}
+    },
+    "sink": {
+      "id": "sink",
+      "kind": "sink",
+      "label": null,
+      "initial_value": 0.0,
+      "tags": [],
+      "metadata": {}
+    }
+  },
+  "edges": {
+    "resource": {
+      "id": "resource",
+      "from": "process",
+      "to": "sink",
+      "transfer": { "fixed": { "amount": 1.0 } },
+      "enabled": true,
+      "metadata": {}
+    },
+    "state": {
+      "id": "state",
+      "from": "process",
+      "to": "sink",
+      "transfer": "remaining",
+      "connection": {
+        "kind": "state",
+        "state": {
+          "role": "modifier",
+          "target": "formula",
+          "target_edge": "resource",
+          "filter": "gold"
+        }
+      },
+      "enabled": true,
+      "metadata": {}
+    }
+  },
+  "end_conditions": [{ "max_steps": { "steps": 2 } }],
+  "tracked_metrics": ["sink"],
+  "metadata": {}
+}

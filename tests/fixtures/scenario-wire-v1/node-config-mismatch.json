@@ -1,0 +1,31 @@
+{
+  "id": "node-config-mismatch",
+  "title": null,
+  "description": null,
+  "tags": [],
+  "nodes": {
+    "source": {
+      "id": "source",
+      "kind": "source",
+      "config": {
+        "family": "pool",
+        "config": {
+          "capacity": 3,
+          "allow_negative_start": false,
+          "mode": {
+            "trigger_mode": "automatic",
+            "action_mode": "push_any"
+          }
+        }
+      },
+      "label": null,
+      "initial_value": 0.0,
+      "tags": [],
+      "metadata": {}
+    }
+  },
+  "edges": {},
+  "end_conditions": [{ "max_steps": { "steps": 1 } }],
+  "tracked_metrics": [],
+  "metadata": {}
+}
