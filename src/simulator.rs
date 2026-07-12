@@ -13,7 +13,7 @@ use crate::events::{
     AssertionCheckpointEvent, EventSink, EventSinkError, MetricSnapshotEvent, RunEvent,
     StepEndEvent, StepStartEvent,
 };
-use crate::types::{BatchConfig, RunConfig, ScenarioSpec};
+use crate::types::{BatchConfig, RunConfig, Scenario, ScenarioSpec};
 use crate::validation;
 use crate::CompiledScenario;
 
@@ -32,6 +32,16 @@ impl Simulator {
     /// transfers, node configs, or variable sources.
     pub fn compile(spec: ScenarioSpec) -> Result<CompiledScenario, SetupError> {
         spec.try_into()
+    }
+
+    /// Builds an execution plan from an already checked scenario without
+    /// reparsing formula text.
+    ///
+    /// # Errors
+    /// Returns [`SetupError`] if the checked scenario's private expression
+    /// bundle does not align with its deterministic edge projections.
+    pub fn compile_checked(scenario: Scenario) -> Result<CompiledScenario, SetupError> {
+        scenario.try_into()
     }
 
     /// Runs one seeded simulation and returns a [`crate::types::RunReport`].

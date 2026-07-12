@@ -6,7 +6,10 @@
 //! events. Callers should prefer [`crate::Simulator`]; this module is the
 //! execution core used by single-run and batch paths.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    num::NonZeroU64,
+};
 
 use crate::error::RunError;
 use crate::events::{
@@ -14,18 +17,19 @@ use crate::events::{
     TransferEvent,
 };
 use crate::expr::{CompiledExpr, ExprError, ExprRuntime};
-use crate::plan::{CompiledEdge, EdgeIndex, NodeIndex, TransferControl, TriggerTarget};
+use crate::plan::{
+    CompiledEdge, CompiledTransfer, EdgeIndex, NodeIndex, TransferControl, TriggerTarget,
+};
 use crate::rng::{rng_from_seed, BaseRng};
 use crate::stochastic::{
     sample_chance_percent, sample_closed_interval, sample_from_list, sample_from_matrix,
     sample_weighted_index,
 };
 use crate::types::{
-    AggregationConfig, CaptureConfig, CaptureSchedule, ConnectionKind, EdgeId, EndConditionSpec,
-    ManifestRef, MetricKey, NodeConfig, NodeId, NodeKind, NodeModeConfig, NodeSnapshot, RunConfig,
-    RunReport, Selection, SeriesPoint, SeriesTable, StateConnectionRole, StateConnectionTarget,
-    TransferRecord, TransferSpec, TriggerMode, VariableSnapshot, VariableSourceSpec,
-    VariableUpdateTiming,
+    AggregationConfig, CaptureConfig, CaptureSchedule, EdgeId, EndConditionSpec, ManifestRef,
+    MetricKey, NodeBehavior, NodeId, NodeModeConfig, NodeSnapshot, RunConfig, RunReport, Selection,
+    SeriesPoint, SeriesTable, StateConnectionRole, StateTarget, TransferRecord, TriggerMode,
+    VariableSnapshot, VariableSourceSpec, VariableUpdateTiming,
 };
 use crate::CompiledScenario;
 
@@ -615,7 +619,7 @@ impl TimelineRuntimeState {
                     if ready <= 0.0 {
                         continue;
                     }
-                    let per_step = queue_release_per_step_for_node(compiled, node_id).max(1) as f64;
+                    let per_step = queue_release_per_step_for_node(compiled, node_id) as f64;
                     let available = canonicalize_float(ready.min(per_step));
                     if available > 0.0 {
                         self.release_budgets.insert(node_id.clone(), available);
@@ -733,7 +737,7 @@ fn sample_variable_source(source: &VariableSourceSpec, rng: &mut BaseRng) -> Opt
 pub(crate) fn init_state(compiled: &CompiledScenario) -> EngineState {
     let node_values = compiled
         .nodes()
-        .map(|(_, node)| canonicalize_float(node.initial_value))
+        .map(|(_, node)| canonicalize_float(node.initial_value()))
         .collect::<Vec<_>>();
 
     let metrics = compiled
@@ -954,11 +958,11 @@ fn formula_run_error(name: String, error: ExprError) -> RunError {
 
 fn apply_source_generation(compiled: &CompiledScenario, state: &mut EngineState) {
     for (index, (_, node)) in compiled.nodes().enumerate() {
-        if !matches!(node.kind, NodeKind::Source) {
+        if !matches!(node.behavior(), NodeBehavior::Source) {
             continue;
         }
 
-        let generation = canonicalize_float(node.initial_value);
+        let generation = canonicalize_float(node.initial_value());
         if generation <= 0.0 || !generation.is_finite() {
             continue;
         }
@@ -1132,9 +1136,8 @@ fn apply_any_edge_group(
     let mut acted = false;
     for edge_id in edge_ids {
         let compiled_edge = compiled.edge_at(*edge_id);
-        let edge = compiled_edge.spec();
         let from_available_override =
-            timeline.transfer_available_for_source(compiled, state, &edge.from)?;
+            timeline.transfer_available_for_source(compiled, state, compiled_edge.from())?;
         let Some(plan) = plan_edge_transfer_any(
             compiled,
             state,
@@ -1175,9 +1178,8 @@ fn apply_all_edge_group(
 
     for edge_id in edge_ids {
         let compiled_edge = compiled.edge_at(*edge_id);
-        let edge = compiled_edge.spec();
         let from_available_override =
-            timeline.transfer_available_for_source(compiled, state, &edge.from)?;
+            timeline.transfer_available_for_source(compiled, state, compiled_edge.from())?;
         let Some(plan) = plan_edge_transfer_all(
             compiled,
             state,
@@ -1225,6 +1227,14 @@ enum GateWeightKind {
     Chance,
 }
 
+fn required_resource(
+    edge: &CompiledEdge,
+) -> Result<(&crate::types::ResourceConnection, &CompiledTransfer), RunError> {
+    edge.resource().ok_or_else(|| {
+        compiled_plan_error(format!("edge {} is not a compiled resource transfer", edge.id()))
+    })
+}
+
 fn should_use_gate_routing(
     compiled: &CompiledScenario,
     node_id: &NodeId,
@@ -1242,11 +1252,14 @@ fn should_use_gate_routing(
     }
 
     for edge_id in edge_ids {
-        let edge = compiled.edge_at(*edge_id).spec();
-        if edge.from != *node_id
-            || !matches!(edge.connection.kind, ConnectionKind::Resource)
-            || edge.connection.resource.token_size != 1
-        {
+        let edge = compiled.edge_at(*edge_id);
+        let Some((resource, _)) = edge.resource() else {
+            return Err(compiled_plan_error(format!(
+                "routing contains non-resource edge {}",
+                edge.id()
+            )));
+        };
+        if edge.from() != node_id || resource.token_size().get() != 1 {
             return Ok(false);
         }
     }
@@ -1463,25 +1476,25 @@ fn gate_weight_for_edge(
     expression_cache: &ExpressionPlanRef<'_>,
     runtime_variables: &BTreeMap<String, f64>,
 ) -> Result<Option<(GateWeightKind, f64)>, RunError> {
-    let edge = compiled_edge.spec();
-    match &edge.transfer {
-        TransferSpec::Fixed { amount } => {
+    let (_, transfer) = required_resource(compiled_edge)?;
+    match transfer {
+        CompiledTransfer::Fixed { amount } => {
             Ok(amount.is_finite().then_some((GateWeightKind::Ratio, canonicalize_float(*amount))))
         }
-        TransferSpec::Fraction { numerator, denominator } => {
-            if *denominator == 0 || *numerator == 0 {
+        CompiledTransfer::Fraction { numerator, denominator } => {
+            if *numerator == 0 {
                 return Ok(None);
             }
-            let weight = *numerator as f64 / *denominator as f64 * 100.0;
+            let weight = *numerator as f64 / denominator.get() as f64 * 100.0;
             Ok(weight
                 .is_finite()
                 .then_some((GateWeightKind::Percentage, canonicalize_float(weight))))
         }
-        TransferSpec::MetricScaled { metric, factor } => {
+        CompiledTransfer::MetricScaled { metric, factor } => {
             let weight = metric_value(compiled, state, metric) * *factor;
             Ok(weight.is_finite().then_some((GateWeightKind::Chance, canonicalize_float(weight))))
         }
-        TransferSpec::Expression { .. } => {
+        CompiledTransfer::Expression => {
             let from_value = state.node_values[compiled_edge.source_index()];
             let requested = transfer_request(
                 compiled,
@@ -1496,7 +1509,7 @@ fn gate_weight_for_edge(
                 .is_finite()
                 .then_some((GateWeightKind::Chance, canonicalize_float(requested))))
         }
-        TransferSpec::Remaining => Ok(Some((GateWeightKind::Chance, 100.0))),
+        CompiledTransfer::Remaining => Ok(Some((GateWeightKind::Chance, 100.0))),
     }
 }
 
@@ -1509,7 +1522,7 @@ fn plan_edge_transfer_any(
     runtime_variables: &BTreeMap<String, f64>,
     from_value_override: Option<f64>,
 ) -> Result<Option<EdgeTransferPlan>, RunError> {
-    let edge = compiled_edge.spec();
+    let (resource, _) = required_resource(compiled_edge)?;
     let from_index = compiled_edge.source_index();
     let to_index = compiled_edge.target_index();
     if from_index == to_index {
@@ -1527,16 +1540,15 @@ fn plan_edge_transfer_any(
         expression_cache,
         runtime_variables,
     )?;
-    let transfer =
-        clamp_transfer_amount(edge.connection.resource.token_size, from_value, requested);
+    let transfer = clamp_transfer_amount(resource.token_size(), from_value, requested);
     if transfer <= 0.0 {
         return Ok(None);
     }
 
     Ok(Some(EdgeTransferPlan {
         edge_id: compiled_edge.id().clone(),
-        from_node_id: edge.from.clone(),
-        to_node_id: edge.to.clone(),
+        from_node_id: compiled_edge.from().clone(),
+        to_node_id: compiled_edge.to().clone(),
         from_index,
         to_index,
         requested,
@@ -1553,7 +1565,7 @@ fn plan_edge_transfer_all(
     runtime_variables: &BTreeMap<String, f64>,
     from_value_override: Option<f64>,
 ) -> Result<Option<EdgeTransferPlan>, RunError> {
-    let edge = compiled_edge.spec();
+    let (resource, _) = required_resource(compiled_edge)?;
     let from_index = compiled_edge.source_index();
     let to_index = compiled_edge.target_index();
     if from_index == to_index {
@@ -1571,15 +1583,15 @@ fn plan_edge_transfer_all(
         expression_cache,
         runtime_variables,
     )?;
-    let transfer = quantize_requested_amount(edge.connection.resource.token_size, requested);
+    let transfer = quantize_requested_amount(resource.token_size(), requested);
     if transfer <= 0.0 {
         return Ok(None);
     }
 
     Ok(Some(EdgeTransferPlan {
         edge_id: compiled_edge.id().clone(),
-        from_node_id: edge.from.clone(),
-        to_node_id: edge.to.clone(),
+        from_node_id: compiled_edge.from().clone(),
+        to_node_id: compiled_edge.to().clone(),
         from_index,
         to_index,
         requested,
@@ -1699,37 +1711,33 @@ fn trigger_mode_for_node(compiled: &CompiledScenario, node_id: &NodeId) -> Trigg
 }
 
 fn gate_behavior_for_node(compiled: &CompiledScenario, node_id: &NodeId) -> GateBehavior {
-    match node_kind_for_node(compiled, node_id) {
-        NodeKind::SortingGate => GateBehavior::Sorting,
-        NodeKind::TriggerGate => GateBehavior::Trigger,
-        NodeKind::MixedGate => GateBehavior::Mixed,
+    match compiled.required_node(node_id).behavior() {
+        NodeBehavior::SortingGate(_) => GateBehavior::Sorting,
+        NodeBehavior::TriggerGate(_) => GateBehavior::Trigger,
+        NodeBehavior::MixedGate(_) => GateBehavior::Mixed,
         _ => GateBehavior::None,
     }
 }
 
-fn node_kind_for_node<'a>(compiled: &'a CompiledScenario, node_id: &NodeId) -> &'a NodeKind {
-    &compiled.required_node(node_id).kind
-}
-
 fn timeline_node_kind(compiled: &CompiledScenario, node_id: &NodeId) -> Option<TimelineNodeKind> {
-    match node_kind_for_node(compiled, node_id) {
-        NodeKind::Delay => Some(TimelineNodeKind::Delay),
-        NodeKind::Queue => Some(TimelineNodeKind::Queue),
+    match compiled.required_node(node_id).behavior() {
+        NodeBehavior::Delay(_) => Some(TimelineNodeKind::Delay),
+        NodeBehavior::Queue(_) => Some(TimelineNodeKind::Queue),
         _ => None,
     }
 }
 
 fn delay_steps_for_node(compiled: &CompiledScenario, node_id: &NodeId) -> u64 {
-    match &compiled.required_node(node_id).config {
-        NodeConfig::Delay(config) => config.delay_steps.max(1),
-        _ => 1,
+    match compiled.required_node(node_id).behavior() {
+        NodeBehavior::Delay(config) => config.delay_steps().get(),
+        _ => unreachable!("timeline routing only calls delay helper for checked delay nodes"),
     }
 }
 
 fn queue_release_per_step_for_node(compiled: &CompiledScenario, node_id: &NodeId) -> u64 {
-    match &compiled.required_node(node_id).config {
-        NodeConfig::Queue(config) => config.release_per_step.max(1),
-        _ => 1,
+    match compiled.required_node(node_id).behavior() {
+        NodeBehavior::Queue(config) => config.release_per_step().get(),
+        _ => unreachable!("timeline routing only calls queue helper for checked queue nodes"),
     }
 }
 
@@ -1738,9 +1746,9 @@ fn queue_release_per_step_for_node(compiled: &CompiledScenario, node_id: &NodeId
 /// (validation rejects an over-capacity initial value for each), so both are
 /// enforced at runtime. Other node kinds have no stored-value capacity.
 fn node_capacity_for_node(compiled: &CompiledScenario, node_id: &NodeId) -> Option<u64> {
-    match &compiled.required_node(node_id).config {
-        NodeConfig::Pool(config) => config.capacity,
-        NodeConfig::Queue(config) => config.capacity,
+    match compiled.required_node(node_id).behavior() {
+        NodeBehavior::Pool(config) => config.capacity(),
+        NodeBehavior::Queue(config) => config.capacity().map(NonZeroU64::get),
         _ => None,
     }
 }
@@ -1772,17 +1780,22 @@ fn node_mode_for_node<'a>(
     compiled: &'a CompiledScenario,
     node_id: &NodeId,
 ) -> Option<&'a NodeModeConfig> {
-    match &compiled.required_node(node_id).config {
-        NodeConfig::Pool(config) => Some(&config.mode),
-        NodeConfig::Drain(config) => Some(&config.mode),
-        NodeConfig::SortingGate(config) => Some(&config.mode),
-        NodeConfig::TriggerGate(config) => Some(&config.mode),
-        NodeConfig::MixedGate(config) => Some(&config.mode),
-        NodeConfig::Converter(config) => Some(&config.mode),
-        NodeConfig::Trader(config) => Some(&config.mode),
-        NodeConfig::Delay(config) => Some(&config.mode),
-        NodeConfig::Queue(config) => Some(&config.mode),
-        NodeConfig::None | NodeConfig::Register(_) => None,
+    match compiled.required_node(node_id).behavior() {
+        NodeBehavior::Pool(config) => Some(config.mode()),
+        NodeBehavior::Drain(config) => Some(config.mode()),
+        NodeBehavior::SortingGate(config) => Some(config.mode()),
+        NodeBehavior::TriggerGate(config) => Some(config.mode()),
+        NodeBehavior::MixedGate(config) => Some(config.mode()),
+        NodeBehavior::Converter(config) => Some(config.mode()),
+        NodeBehavior::Trader(config) => Some(config.mode()),
+        NodeBehavior::Delay(config) => Some(config.mode()),
+        NodeBehavior::Queue(config) => Some(config.mode()),
+        NodeBehavior::Source
+        | NodeBehavior::Register(_)
+        | NodeBehavior::Process
+        | NodeBehavior::Sink
+        | NodeBehavior::Gate
+        | NodeBehavior::Custom(_) => None,
     }
 }
 
@@ -1797,14 +1810,15 @@ fn apply_state_connections(
 
     for compiled_edge in compiled.edges() {
         let edge_id = compiled_edge.id();
-        let edge = compiled_edge.spec();
-        if !edge.enabled || !matches!(edge.connection.kind, ConnectionKind::State) {
+        if !compiled_edge.enabled() {
             continue;
         }
 
-        let state_config = &edge.connection.state;
-        if !matches!(state_config.role, StateConnectionRole::Modifier)
-            || !matches!(state_config.target, StateConnectionTarget::Node)
+        let Some(state_config) = compiled_edge.state() else {
+            continue;
+        };
+        if !matches!(state_config.role(), StateConnectionRole::Modifier)
+            || !matches!(state_config.target(), StateTarget::Node)
         {
             continue;
         }
@@ -1861,21 +1875,17 @@ fn transfer_request(
     expression_cache: &ExpressionPlanRef<'_>,
     runtime_variables: &BTreeMap<String, f64>,
 ) -> Result<f64, RunError> {
-    let edge = compiled_edge.spec();
-    let requested = match &edge.transfer {
-        TransferSpec::Fixed { amount } => *amount,
-        TransferSpec::Fraction { numerator, denominator } => {
-            if *denominator == 0 {
-                0.0
-            } else {
-                from_value * (*numerator as f64 / *denominator as f64)
-            }
+    let (_, transfer) = required_resource(compiled_edge)?;
+    let requested = match transfer {
+        CompiledTransfer::Fixed { amount } => *amount,
+        CompiledTransfer::Fraction { numerator, denominator } => {
+            from_value * (*numerator as f64 / denominator.get() as f64)
         }
-        TransferSpec::Remaining => from_value,
-        TransferSpec::MetricScaled { metric, factor } => {
+        CompiledTransfer::Remaining => from_value,
+        CompiledTransfer::MetricScaled { metric, factor } => {
             metric_value(compiled, state, metric) * *factor
         }
-        TransferSpec::Expression { .. } => {
+        CompiledTransfer::Expression => {
             let Some(compiled_expression) =
                 expression_cache.transfer_expression(compiled_edge.id())
             else {
@@ -1915,7 +1925,7 @@ fn transfer_request(
     Ok(canonicalize_float(requested))
 }
 
-fn clamp_transfer_amount(token_size: u64, from_value: f64, requested: f64) -> f64 {
+fn clamp_transfer_amount(token_size: NonZeroU64, from_value: f64, requested: f64) -> f64 {
     if !requested.is_finite() || requested <= 0.0 {
         return 0.0;
     }
@@ -1929,12 +1939,12 @@ fn clamp_transfer_amount(token_size: u64, from_value: f64, requested: f64) -> f6
     quantize_requested_amount(token_size, bounded)
 }
 
-fn quantize_requested_amount(token_size: u64, requested: f64) -> f64 {
+fn quantize_requested_amount(token_size: NonZeroU64, requested: f64) -> f64 {
     if !requested.is_finite() || requested <= 0.0 {
         return 0.0;
     }
 
-    let token_size = token_size.max(1) as f64;
+    let token_size = token_size.get() as f64;
     let transferable_tokens = (requested / token_size).floor();
     if transferable_tokens <= 0.0 {
         return 0.0;

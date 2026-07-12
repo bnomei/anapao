@@ -11,8 +11,8 @@ use std::collections::BTreeMap;
 use crate::error::SetupError;
 use crate::expr::ExprRuntime;
 use crate::plan::{
-    CompiledEdge, CompiledExpressions, CompiledNode, CompiledScenario, EdgeIndex, ExpressionSlots,
-    MetricPlan, NodeIndex, PlanIndexes, PlanProjections, RoutingPlan,
+    CompiledEdge, CompiledExpressions, CompiledNode, CompiledScenario, CompiledTransfer, EdgeIndex,
+    ExpressionSlots, MetricPlan, NodeIndex, PlanIndexes, PlanProjections, RoutingPlan,
 };
 use crate::types::{
     BatchConfig, BatchRunTemplate, ConnectionKind, ConnectionSpec, ConverterConfig, DelayConfig,
@@ -37,6 +37,10 @@ pub(crate) fn compile_scenario(spec: &ScenarioSpec) -> Result<CompiledScenario, 
 }
 
 fn compile_scenario_owned(spec: ScenarioSpec) -> Result<CompiledScenario, SetupError> {
+    assemble_checked_scenario(check_scenario(spec)?)
+}
+
+fn validate_edge_references(spec: &ScenarioSpec) -> Result<(), SetupError> {
     for (edge_id, edge) in &spec.edges {
         if !spec.nodes.contains_key(&edge.from) {
             return Err(SetupError::InvalidGraphReference {
@@ -44,7 +48,7 @@ fn compile_scenario_owned(spec: ScenarioSpec) -> Result<CompiledScenario, SetupE
                 reference: with_available_ids_hint(
                     format!("edges.{edge_id}.from references missing nodes.{}", edge.from),
                     "node IDs",
-                    available_node_ids(&spec),
+                    available_node_ids(spec),
                 ),
             });
         }
@@ -54,26 +58,23 @@ fn compile_scenario_owned(spec: ScenarioSpec) -> Result<CompiledScenario, SetupE
                 reference: with_available_ids_hint(
                     format!("edges.{edge_id}.to references missing nodes.{}", edge.to),
                     "node IDs",
-                    available_node_ids(&spec),
+                    available_node_ids(spec),
                 ),
             });
         }
     }
 
-    for (index, condition) in spec.end_conditions.iter().enumerate() {
-        let path = format!("end_conditions[{index}]");
-        validate_end_condition_shape(condition, &path)?;
-        validate_end_condition_references(&spec, condition, &path)?;
-    }
-    validate_transfer_metric_references(&spec)?;
-    validate_tracked_metric_references(&spec)?;
-    validate_resource_connection_cycles(&spec)?;
-    let expression_slots = validate_connection_invariants(&spec)?;
-    validate_node_invariants(&spec)?;
-    validate_variable_sources(&spec)?;
+    Ok(())
+}
 
-    let node_ids = spec.nodes.keys().cloned().collect::<Box<[_]>>();
-    let edge_ids = spec.edges.keys().cloned().collect::<Box<[_]>>();
+fn assemble_checked_scenario(scenario: Scenario) -> Result<CompiledScenario, SetupError> {
+    let source_spec = scenario.source_spec().clone();
+    let checked_nodes = scenario.nodes().clone();
+    let checked_edges = scenario.edges().clone();
+    let mut validated_expressions = scenario.expressions;
+
+    let node_ids = checked_nodes.keys().cloned().collect::<Box<[_]>>();
+    let edge_ids = checked_edges.keys().cloned().collect::<Box<[_]>>();
 
     let node_index_by_id: BTreeMap<NodeId, NodeIndex> = node_ids
         .iter()
@@ -86,22 +87,84 @@ fn compile_scenario_owned(spec: ScenarioSpec) -> Result<CompiledScenario, SetupE
         .map(|(index, edge_id)| (edge_id.clone(), EdgeIndex::new(index)))
         .collect();
     let nodes =
-        node_ids.iter().map(|id| CompiledNode::new(id.clone(), spec.nodes[id].clone())).collect();
-    let edges = edge_ids
-        .iter()
-        .map(|id| {
-            let edge = spec.edges[id].clone();
-            let from_index = node_index_by_id[&edge.from].value();
-            let to_index = node_index_by_id[&edge.to].value();
-            CompiledEdge::new(id.clone(), edge, from_index, to_index)
-        })
-        .collect();
+        node_ids.iter().map(|id| CompiledNode::new(id.clone(), &checked_nodes[id])).collect();
+    let mut expression_slots = Vec::with_capacity(edge_ids.len());
+    let mut edges = Vec::with_capacity(edge_ids.len());
+    for id in edge_ids.iter() {
+        let edge = &checked_edges[id];
+        let (transfer, transfer_expression) = match edge.connection() {
+            ConnectionSpec::Resource(_) => {
+                let transfer = match edge.transfer() {
+                    TransferSpec::Fixed { amount } => CompiledTransfer::Fixed { amount: *amount },
+                    TransferSpec::Fraction { numerator, denominator } => {
+                        let denominator = NonZeroU64::new(*denominator).ok_or_else(|| {
+                            SetupError::InvalidParameter {
+                                name: format!("edges.{id}.transfer.fraction.denominator"),
+                                reason: "must be greater than 0".into(),
+                            }
+                        })?;
+                        CompiledTransfer::Fraction { numerator: *numerator, denominator }
+                    }
+                    TransferSpec::Remaining => CompiledTransfer::Remaining,
+                    TransferSpec::MetricScaled { metric, factor } => {
+                        CompiledTransfer::MetricScaled { metric: metric.clone(), factor: *factor }
+                    }
+                    TransferSpec::Expression { .. } => CompiledTransfer::Expression,
+                };
+                let expression = if matches!(transfer, CompiledTransfer::Expression) {
+                    Some(
+                        validated_expressions
+                            .transfer
+                            .remove(id)
+                            .ok_or_else(|| missing_expression(id, "transfer.expression.formula"))?,
+                    )
+                } else {
+                    None
+                };
+                (Some(transfer), expression)
+            }
+            ConnectionSpec::State(_) => (None, None),
+        };
+        let state_expression = match edge.connection() {
+            ConnectionSpec::State(state)
+                if matches!(state.role(), StateConnectionRole::Modifier) =>
+            {
+                Some(
+                    validated_expressions
+                        .state
+                        .remove(id)
+                        .ok_or_else(|| missing_expression(id, "connection.state.formula"))?,
+                )
+            }
+            ConnectionSpec::Resource(_) | ConnectionSpec::State(_) => None,
+        };
+        expression_slots
+            .push(ExpressionSlots { transfer: transfer_expression, state: state_expression });
+        edges.push(CompiledEdge::new(
+            id.clone(),
+            edge,
+            transfer,
+            node_index_by_id[edge.from()].value(),
+            node_index_by_id[edge.to()].value(),
+        ));
+    }
+    if !validated_expressions.transfer.is_empty() || !validated_expressions.state.is_empty() {
+        return Err(SetupError::InvalidParameter {
+            name: "scenario.expressions".into(),
+            reason: "validated expression bundle contains entries not used by checked edges".into(),
+        });
+    }
 
-    let routing = RoutingPlan::from_spec(&spec, &node_index_by_id, &edge_index_by_id);
-    let metrics = MetricPlan::from_spec(&spec, &node_index_by_id);
+    let routing = RoutingPlan::from_checked(
+        &checked_nodes,
+        &checked_edges,
+        &node_index_by_id,
+        &edge_index_by_id,
+    );
+    let metrics = MetricPlan::from_spec(&source_spec, &node_index_by_id);
     Ok(CompiledScenario::from_validated(
-        spec,
-        PlanProjections::new(node_ids, edge_ids, nodes, edges),
+        source_spec,
+        PlanProjections::new(node_ids, edge_ids, nodes, edges.into_boxed_slice()),
         PlanIndexes::new(node_index_by_id.clone(), edge_index_by_id.clone()),
         CompiledExpressions::from_slots(expression_slots),
         routing,
@@ -109,11 +172,26 @@ fn compile_scenario_owned(spec: ScenarioSpec) -> Result<CompiledScenario, SetupE
     ))
 }
 
+fn missing_expression(edge_id: &EdgeId, field: &str) -> SetupError {
+    SetupError::InvalidParameter {
+        name: format!("edges.{edge_id}.{field}"),
+        reason: "validated expression is missing from the checked scenario".into(),
+    }
+}
+
 impl TryFrom<ScenarioSpec> for CompiledScenario {
     type Error = SetupError;
 
     fn try_from(spec: ScenarioSpec) -> Result<Self, Self::Error> {
         compile_scenario_owned(spec)
+    }
+}
+
+impl TryFrom<Scenario> for CompiledScenario {
+    type Error = SetupError;
+
+    fn try_from(scenario: Scenario) -> Result<Self, Self::Error> {
+        assemble_checked_scenario(scenario)
     }
 }
 
@@ -147,14 +225,7 @@ pub(crate) fn check_scenario(spec: ScenarioSpec) -> Result<Scenario, SetupError>
     }
 
     // Preserve the legacy graph passes after local tag/payload reconciliation.
-    for (edge_id, edge) in &spec.edges {
-        if !spec.nodes.contains_key(&edge.from) || !spec.nodes.contains_key(&edge.to) {
-            // Delegate exact legacy reference diagnostics.
-            let _ = compile_scenario_owned(spec.clone())?;
-            unreachable!();
-        }
-        let _ = edge_id;
-    }
+    validate_edge_references(&spec)?;
     for (index, condition) in spec.end_conditions.iter().enumerate() {
         let path = format!("end_conditions[{index}]");
         validate_end_condition_shape(condition, &path)?;
@@ -1134,15 +1205,18 @@ fn validate_queue_constraints(node_id: &NodeId, node: &NodeSpec) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use crate::error::SetupError;
+    use crate::expr::ExprRuntime;
     use crate::types::{
         AggregationConfig, BatchConfig, BatchRunTemplate, CaptureConfig, ConnectionKind,
         DelayNodeConfig, EdgeConnectionConfig, EdgeSpec, EndConditionSpec, ExecutionMode,
         MetricKey, NodeConfig, NodeKind, NodeSpec, PoolNodeConfig, QueueNodeConfig, RunConfig,
-        ScenarioId, ScenarioSpec, StateConnectionConfig, StateConnectionRole,
+        Scenario, ScenarioId, ScenarioSpec, StateConnectionConfig, StateConnectionRole,
         StateConnectionTarget, TransferSpec,
     };
 
-    use super::{compile_scenario, validate_batch_config, validate_run_config};
+    use super::{
+        assemble_checked_scenario, compile_scenario, validate_batch_config, validate_run_config,
+    };
 
     #[test]
     fn compile_scenario_builds_deterministic_indexes() {
@@ -2559,5 +2633,45 @@ mod tests {
             }
             other => panic!("expected InvalidParameter, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn checked_assembler_rejects_a_missing_required_expression() {
+        let source = crate::types::NodeId::fixture("source");
+        let sink = crate::types::NodeId::fixture("sink");
+        let edge = crate::types::EdgeId::fixture("expression");
+        let spec = ScenarioSpec::new(ScenarioId::fixture("missing-expression"))
+            .with_node(NodeSpec::new(source.clone(), NodeKind::Process))
+            .with_node(NodeSpec::new(sink.clone(), NodeKind::Pool))
+            .with_edge(EdgeSpec::new(
+                edge,
+                source,
+                sink,
+                TransferSpec::Expression { formula: "from".into() },
+            ));
+        let mut checked = Scenario::try_from(spec).expect("formula validates once");
+        checked.expressions.transfer.clear();
+
+        let error = assemble_checked_scenario(checked).expect_err("missing AST must fail");
+        assert!(error.to_string().contains("edges.expression.transfer.expression.formula"));
+    }
+
+    #[test]
+    fn checked_assembler_rejects_an_unexpected_expression_bundle_entry() {
+        let source = crate::types::NodeId::fixture("source");
+        let sink = crate::types::NodeId::fixture("sink");
+        let edge = crate::types::EdgeId::fixture("remaining");
+        let spec = ScenarioSpec::new(ScenarioId::fixture("unexpected-expression"))
+            .with_node(NodeSpec::new(source.clone(), NodeKind::Process))
+            .with_node(NodeSpec::new(sink.clone(), NodeKind::Pool))
+            .with_edge(EdgeSpec::new(edge.clone(), source, sink, TransferSpec::Remaining));
+        let mut checked = Scenario::try_from(spec).expect("scenario checks");
+        checked
+            .expressions
+            .transfer
+            .insert(edge, ExprRuntime::new().compile("1").expect("test expression compiles"));
+
+        let error = assemble_checked_scenario(checked).expect_err("extra AST must fail");
+        assert!(error.to_string().contains("scenario.expressions"));
     }
 }

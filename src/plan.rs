@@ -5,14 +5,14 @@
 //! inspection accessors; execution modules use the narrow crate-private query
 //! methods below instead of rejoining the source maps and derived indexes.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, num::NonZeroU64, sync::Arc};
 
 use crate::{
     expr::CompiledExpr,
     types::{
-        ActionMode, ConnectionKind, EdgeId, EdgeSpec, MetricKey, NodeConfig, NodeId,
-        NodeModeConfig, NodeSpec, ScenarioId, ScenarioSpec, StateConnectionRole,
-        StateConnectionTarget,
+        ActionMode, ConnectionSpec, EdgeId, EndConditionSpec, MetricKey, NodeBehavior, NodeId,
+        NodeModeConfig, ResourceConnection, ScenarioEdge, ScenarioId, ScenarioNode, ScenarioSpec,
+        StateConnection, StateConnectionRole, StateTarget, VariableRuntimeConfig,
     },
 };
 
@@ -31,6 +31,8 @@ struct ExecutionPlan {
     expressions: CompiledExpressions,
     routing: RoutingPlan,
     metrics: MetricPlan,
+    variables: VariableRuntimeConfig,
+    end_conditions: Box<[EndConditionSpec]>,
 }
 
 pub(crate) struct PlanProjections {
@@ -91,15 +93,33 @@ pub(crate) struct MetricPlan {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CompiledNode {
     id: NodeId,
-    spec: NodeSpec,
+    behavior: NodeBehavior,
+    initial_value: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CompiledEdge {
     id: EdgeId,
-    spec: EdgeSpec,
+    from: NodeId,
+    to: NodeId,
+    transfer: Option<CompiledTransfer>,
+    connection: ConnectionSpec,
+    enabled: bool,
     from_index: NodeIndex,
     to_index: NodeIndex,
+}
+
+/// Transfer projection used by the engine after checked compilation.
+///
+/// Resource fractions carry a non-zero denominator, so execution never needs
+/// to repair an invalid DTO value or branch around division by zero.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum CompiledTransfer {
+    Fixed { amount: f64 },
+    Fraction { numerator: u64, denominator: NonZeroU64 },
+    Remaining,
+    MetricScaled { metric: MetricKey, factor: f64 },
+    Expression,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -145,6 +165,8 @@ impl CompiledScenario {
         routing: RoutingPlan,
         metrics: MetricPlan,
     ) -> Self {
+        let variables = source_spec.variables.clone();
+        let end_conditions = source_spec.end_conditions.clone().into_boxed_slice();
         Self(Arc::new(ExecutionPlan {
             source_spec,
             node_ids: projections.node_ids,
@@ -156,6 +178,8 @@ impl CompiledScenario {
             expressions,
             routing,
             metrics,
+            variables,
+            end_conditions,
         }))
     }
 
@@ -163,8 +187,8 @@ impl CompiledScenario {
     ///
     /// Engine callers use this only for IDs derived from the immutable plan; a
     /// missing entry is therefore an invariant breach, never a runtime default.
-    pub(crate) fn required_node(&self, id: &NodeId) -> &NodeSpec {
-        &self.0.nodes[self.0.node_index_by_id[id].0].spec
+    pub(crate) fn required_node(&self, id: &NodeId) -> &CompiledNode {
+        &self.0.nodes[self.0.node_index_by_id[id].0]
     }
 
     /// Returns a node index whose identity was already resolved by compilation.
@@ -176,8 +200,8 @@ impl CompiledScenario {
         self.0.nodes.get(index).map(|node| &node.id)
     }
 
-    pub(crate) fn nodes(&self) -> impl Iterator<Item = (&NodeId, &NodeSpec)> {
-        self.0.nodes.iter().map(|node| (&node.id, &node.spec))
+    pub(crate) fn nodes(&self) -> impl Iterator<Item = (&NodeId, &CompiledNode)> {
+        self.0.nodes.iter().map(|node| (&node.id, node))
     }
 
     pub(crate) fn edge_at(&self, index: EdgeIndex) -> &CompiledEdge {
@@ -209,11 +233,11 @@ impl CompiledScenario {
     }
 
     pub(crate) fn variables(&self) -> &crate::types::VariableRuntimeConfig {
-        &self.0.source_spec.variables
+        &self.0.variables
     }
 
     pub(crate) fn end_conditions(&self) -> &[crate::types::EndConditionSpec] {
-        &self.0.source_spec.end_conditions
+        &self.0.end_conditions
     }
 
     pub(crate) fn expressions(&self) -> &CompiledExpressions {
@@ -226,8 +250,16 @@ impl CompiledScenario {
 }
 
 impl CompiledNode {
-    pub(crate) fn new(id: NodeId, spec: NodeSpec) -> Self {
-        Self { id, spec }
+    pub(crate) fn new(id: NodeId, node: &ScenarioNode) -> Self {
+        Self { id, behavior: node.behavior().clone(), initial_value: node.initial_value() }
+    }
+
+    pub(crate) fn behavior(&self) -> &NodeBehavior {
+        &self.behavior
+    }
+
+    pub(crate) fn initial_value(&self) -> f64 {
+        self.initial_value
     }
 }
 
@@ -291,8 +323,9 @@ impl CompiledExpressions {
 }
 
 impl RoutingPlan {
-    pub(crate) fn from_spec(
-        spec: &ScenarioSpec,
+    pub(crate) fn from_checked(
+        nodes: &BTreeMap<NodeId, ScenarioNode>,
+        edges: &BTreeMap<EdgeId, ScenarioEdge>,
         node_index_by_id: &BTreeMap<NodeId, NodeIndex>,
         edge_index_by_id: &BTreeMap<EdgeId, EdgeIndex>,
     ) -> Self {
@@ -301,19 +334,19 @@ impl RoutingPlan {
         let mut passive_state_triggers = Vec::new();
         let mut trigger_outputs_by_source = BTreeMap::<NodeIndex, Vec<TriggerTarget>>::new();
 
-        for (edge_id, edge) in &spec.edges {
-            if !edge.enabled {
+        for (edge_id, edge) in edges {
+            if !edge.enabled() {
                 continue;
             }
             let edge_index = edge_index_by_id[edge_id];
-            let source = node_index_by_id[&edge.from];
-            let target = node_index_by_id[&edge.to];
-            if matches!(edge.connection.kind, ConnectionKind::Resource) {
-                let target_action = normalized_action_mode(action_mode_for_node(spec, &edge.to));
+            let source = node_index_by_id[edge.from()];
+            let target = node_index_by_id[edge.to()];
+            if matches!(edge.connection(), ConnectionSpec::Resource(_)) {
+                let target_action = normalized_action_mode(action_mode_for_node(nodes, edge.to()));
                 let (controller, control) = match target_action {
                     TransferControl::PullAny | TransferControl::PullAll => (target, target_action),
                     TransferControl::PushAny | TransferControl::PushAll => {
-                        (source, normalized_action_mode(action_mode_for_node(spec, &edge.from)))
+                        (source, normalized_action_mode(action_mode_for_node(nodes, edge.from())))
                     }
                 };
                 resource_groups_by_controller
@@ -323,19 +356,15 @@ impl RoutingPlan {
                     .or_default()
                     .push(edge_index);
             }
-            if !matches!(edge.connection.kind, ConnectionKind::State)
-                || !matches!(edge.connection.state.role, StateConnectionRole::Trigger)
-            {
+            let ConnectionSpec::State(state) = edge.connection() else {
+                continue;
+            };
+            if !matches!(state.role(), StateConnectionRole::Trigger) {
                 continue;
             }
-            let targets = trigger_targets(
-                &edge.connection.state.target,
-                edge.connection.state.target_connection.as_ref(),
-                target,
-                edge_index_by_id,
-            );
+            let targets = trigger_targets(state.target(), target, edge_index_by_id);
             trigger_outputs_by_source.entry(source).or_default().extend(targets.iter().copied());
-            if !is_trigger_gate(spec, &edge.from) {
+            if !is_trigger_gate(nodes, edge.from()) {
                 passive_state_triggers.push((source, targets.into_boxed_slice()));
             }
         }
@@ -396,23 +425,29 @@ impl MetricPlan {
     }
 }
 
-fn action_mode_for_node(spec: &ScenarioSpec, node_id: &NodeId) -> ActionMode {
-    let node = &spec.nodes[node_id];
-    node_mode(&node.config).map(|mode| mode.action_mode.clone()).unwrap_or(ActionMode::PushAny)
+fn action_mode_for_node(nodes: &BTreeMap<NodeId, ScenarioNode>, node_id: &NodeId) -> ActionMode {
+    node_mode(nodes[node_id].behavior())
+        .map(|mode| mode.action_mode.clone())
+        .unwrap_or(ActionMode::PushAny)
 }
 
-fn node_mode(config: &NodeConfig) -> Option<&NodeModeConfig> {
-    match config {
-        NodeConfig::Pool(config) => Some(&config.mode),
-        NodeConfig::Drain(config) => Some(&config.mode),
-        NodeConfig::SortingGate(config) => Some(&config.mode),
-        NodeConfig::TriggerGate(config) => Some(&config.mode),
-        NodeConfig::MixedGate(config) => Some(&config.mode),
-        NodeConfig::Converter(config) => Some(&config.mode),
-        NodeConfig::Trader(config) => Some(&config.mode),
-        NodeConfig::Delay(config) => Some(&config.mode),
-        NodeConfig::Queue(config) => Some(&config.mode),
-        NodeConfig::None | NodeConfig::Register(_) => None,
+fn node_mode(behavior: &NodeBehavior) -> Option<&NodeModeConfig> {
+    match behavior {
+        NodeBehavior::Pool(config) => Some(config.mode()),
+        NodeBehavior::Drain(config) => Some(config.mode()),
+        NodeBehavior::SortingGate(config) => Some(config.mode()),
+        NodeBehavior::TriggerGate(config) => Some(config.mode()),
+        NodeBehavior::MixedGate(config) => Some(config.mode()),
+        NodeBehavior::Converter(config) => Some(config.mode()),
+        NodeBehavior::Trader(config) => Some(config.mode()),
+        NodeBehavior::Delay(config) => Some(config.mode()),
+        NodeBehavior::Queue(config) => Some(config.mode()),
+        NodeBehavior::Source
+        | NodeBehavior::Register(_)
+        | NodeBehavior::Process
+        | NodeBehavior::Sink
+        | NodeBehavior::Gate
+        | NodeBehavior::Custom(_) => None,
     }
 }
 
@@ -425,40 +460,72 @@ fn normalized_action_mode(mode: ActionMode) -> TransferControl {
     }
 }
 
-fn is_trigger_gate(spec: &ScenarioSpec, node_id: &NodeId) -> bool {
-    matches!(spec.nodes[node_id].config, NodeConfig::TriggerGate(_) | NodeConfig::MixedGate(_))
+fn is_trigger_gate(nodes: &BTreeMap<NodeId, ScenarioNode>, node_id: &NodeId) -> bool {
+    matches!(nodes[node_id].behavior(), NodeBehavior::TriggerGate(_) | NodeBehavior::MixedGate(_))
 }
 
 fn trigger_targets(
-    target: &StateConnectionTarget,
-    target_connection: Option<&EdgeId>,
+    target: &StateTarget,
     node_target: NodeIndex,
     edge_index_by_id: &BTreeMap<EdgeId, EdgeIndex>,
 ) -> Vec<TriggerTarget> {
     match target {
-        StateConnectionTarget::Node => vec![TriggerTarget::Node(node_target)],
-        StateConnectionTarget::ResourceConnection | StateConnectionTarget::StateConnection => {
-            target_connection
-                .and_then(|id| edge_index_by_id.get(id).copied())
-                .map(TriggerTarget::Edge)
-                .into_iter()
-                .collect()
+        StateTarget::Node => vec![TriggerTarget::Node(node_target)],
+        StateTarget::ResourceConnection(id) | StateTarget::StateConnection(id) => {
+            vec![TriggerTarget::Edge(edge_index_by_id[id])]
         }
-        StateConnectionTarget::Formula => Vec::new(),
+        StateTarget::Formula(_) => Vec::new(),
     }
 }
 
 impl CompiledEdge {
-    pub(crate) fn new(id: EdgeId, spec: EdgeSpec, from_index: usize, to_index: usize) -> Self {
-        Self { id, spec, from_index: NodeIndex(from_index), to_index: NodeIndex(to_index) }
+    pub(crate) fn new(
+        id: EdgeId,
+        edge: &ScenarioEdge,
+        transfer: Option<CompiledTransfer>,
+        from_index: usize,
+        to_index: usize,
+    ) -> Self {
+        Self {
+            id,
+            from: edge.from().clone(),
+            to: edge.to().clone(),
+            transfer,
+            connection: edge.connection().clone(),
+            enabled: edge.enabled(),
+            from_index: NodeIndex(from_index),
+            to_index: NodeIndex(to_index),
+        }
     }
 
     pub(crate) fn id(&self) -> &EdgeId {
         &self.id
     }
 
-    pub(crate) fn spec(&self) -> &EdgeSpec {
-        &self.spec
+    pub(crate) fn from(&self) -> &NodeId {
+        &self.from
+    }
+
+    pub(crate) fn to(&self) -> &NodeId {
+        &self.to
+    }
+
+    pub(crate) fn resource(&self) -> Option<(&ResourceConnection, &CompiledTransfer)> {
+        match (&self.connection, &self.transfer) {
+            (ConnectionSpec::Resource(connection), Some(transfer)) => Some((connection, transfer)),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn state(&self) -> Option<&StateConnection> {
+        match &self.connection {
+            ConnectionSpec::State(connection) => Some(connection),
+            ConnectionSpec::Resource(_) => None,
+        }
+    }
+
+    pub(crate) fn enabled(&self) -> bool {
+        self.enabled
     }
 
     pub(crate) fn source_index(&self) -> usize {
@@ -479,8 +546,8 @@ mod tests {
         testkit::{deterministic_run_config, fixture_scenario},
         types::{
             ConnectionKind, EdgeConnectionConfig, EdgeId, EdgeSpec, MetricKey, NodeId, NodeKind,
-            NodeSpec, ScenarioId, ScenarioSpec, StateConnectionConfig, StateConnectionRole,
-            StateConnectionTarget, TransferSpec,
+            NodeSpec, Scenario, ScenarioId, ScenarioSpec, StateConnectionConfig,
+            StateConnectionRole, StateConnectionTarget, TransferSpec,
         },
         Simulator,
     };
@@ -523,20 +590,15 @@ mod tests {
     }
 
     #[test]
-    fn compiled_edge_uses_collection_key_when_embedded_id_differs() {
+    fn compile_rejects_collection_key_and_embedded_id_drift() {
         let mut scenario = fixture_scenario();
         let (_, mut edge) = scenario.edges.pop_first().expect("fixture should contain one edge");
         let collection_key = EdgeId::fixture("collection-key");
         edge.id = EdgeId::fixture("embedded-id");
         scenario.edges.insert(collection_key.clone(), edge);
 
-        let compiled = Simulator::compile(scenario)
-            .expect("collection and embedded IDs may differ in this migration slice");
-        let report = Simulator::run(&compiled, &deterministic_run_config())
-            .expect("compiled mismatched-key fixture should run");
-
-        assert_eq!(compiled.edge_ids(), std::slice::from_ref(&collection_key));
-        assert_eq!(report.transfers[0].edge_id, collection_key);
+        let error = Simulator::compile(scenario).expect_err("edge ID drift must fail checking");
+        assert!(error.to_string().contains("edges.collection-key.id"));
     }
 
     #[test]
@@ -607,5 +669,72 @@ mod tests {
         );
         assert_eq!(compiled.metric_node_index(&metric), Some(1));
         assert_eq!(compiled.tracked_metrics(), [metric]);
+    }
+
+    #[test]
+    fn dto_and_checked_compile_paths_produce_identical_formula_results() {
+        let source = NodeId::fixture("source");
+        let sink = NodeId::fixture("sink");
+        let scenario = ScenarioSpec::new(ScenarioId::fixture("checked-formula-parity"))
+            .with_node(NodeSpec::new(source.clone(), NodeKind::Process).with_initial_value(8.0))
+            .with_node(NodeSpec::new(sink.clone(), NodeKind::Pool))
+            .with_edge(EdgeSpec::new(
+                EdgeId::fixture("transfer"),
+                source,
+                sink,
+                TransferSpec::Expression { formula: "from / 2".into() },
+            ));
+
+        let dto_compiled = Simulator::compile(scenario.clone()).expect("DTO compile succeeds");
+        let checked = Scenario::try_from(scenario).expect("scenario checking succeeds");
+        let checked_compiled =
+            Simulator::compile_checked(checked).expect("checked compile succeeds");
+
+        let config = deterministic_run_config();
+        assert_eq!(
+            Simulator::run(&dto_compiled, &config).expect("DTO plan runs"),
+            Simulator::run(&checked_compiled, &config).expect("checked plan runs")
+        );
+    }
+
+    #[test]
+    fn disabled_formula_edges_keep_their_deterministic_expression_slots() {
+        let source = NodeId::fixture("source");
+        let sink = NodeId::fixture("sink");
+        let modifier = EdgeConnectionConfig {
+            kind: ConnectionKind::State,
+            state: StateConnectionConfig {
+                role: StateConnectionRole::Modifier,
+                formula: "+1".into(),
+                target: StateConnectionTarget::Node,
+                target_connection: None,
+                resource_filter: None,
+            },
+            ..EdgeConnectionConfig::default()
+        };
+        let mut transfer_edge = EdgeSpec::new(
+            EdgeId::fixture("a-transfer"),
+            source.clone(),
+            sink.clone(),
+            TransferSpec::Expression { formula: "from".into() },
+        );
+        transfer_edge.enabled = false;
+        let mut state_edge = EdgeSpec::new(
+            EdgeId::fixture("b-state"),
+            source.clone(),
+            sink.clone(),
+            TransferSpec::Remaining,
+        )
+        .with_connection(modifier);
+        state_edge.enabled = false;
+        let scenario = ScenarioSpec::new(ScenarioId::fixture("disabled-formula-slots"))
+            .with_node(NodeSpec::new(source.clone(), NodeKind::Process))
+            .with_node(NodeSpec::new(sink.clone(), NodeKind::Pool))
+            .with_edge(transfer_edge)
+            .with_edge(state_edge);
+
+        let compiled = Simulator::compile(scenario).expect("disabled formulas still validate");
+        assert!(compiled.expressions().transfer(EdgeIndex::new(0)).is_some());
+        assert!(compiled.expressions().state(EdgeIndex::new(1)).is_some());
     }
 }
