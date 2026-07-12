@@ -15,11 +15,16 @@ use crate::plan::{
     MetricPlan, NodeIndex, PlanIndexes, PlanProjections, RoutingPlan,
 };
 use crate::types::{
-    BatchConfig, BatchRunTemplate, ConnectionKind, DelayNodeConfig, EdgeId, EdgeSpec,
-    EndConditionSpec, MetricKey, NodeConfig, NodeId, NodeKind, NodeSpec, QueueNodeConfig,
-    ResourceConnectionConfig, RunConfig, ScenarioSpec, StateConnectionRole, StateConnectionTarget,
-    TransferSpec, VariableSourceSpec,
+    BatchConfig, BatchRunTemplate, ConnectionKind, ConnectionSpec, ConverterConfig, DelayConfig,
+    DelayNodeConfig, DrainConfig, EdgeId, EdgeSpec, EndConditionSpec, MetricKey, MixedGateConfig,
+    NodeBehavior, NodeConfig, NodeId, NodeKind, NodeSpec, PoolConfig, QueueConfig, QueueNodeConfig,
+    RegisterConfig, ResourceConnection, ResourceConnectionConfig, RunConfig, Scenario,
+    ScenarioEdge, ScenarioNode, ScenarioSpec, SortingGateConfig, StateConnection,
+    StateConnectionRole, StateConnectionTarget, StateTarget, TraderConfig, TransferSpec,
+    TriggerGateConfig, ValidatedExpressions, VariableSourceSpec,
 };
+
+use std::num::NonZeroU64;
 
 /// Validates structural invariants and builds deterministic iteration indexes.
 ///
@@ -110,6 +115,262 @@ impl TryFrom<ScenarioSpec> for CompiledScenario {
     fn try_from(spec: ScenarioSpec) -> Result<Self, Self::Error> {
         compile_scenario_owned(spec)
     }
+}
+
+/// Converts the serde document into the immutable checked domain.  This is kept
+/// beside the existing graph validation so both entry points use identical graph
+/// passes and error vocabulary.
+pub(crate) fn check_scenario(spec: ScenarioSpec) -> Result<Scenario, SetupError> {
+    for (key, node) in &spec.nodes {
+        if key != &node.id {
+            return Err(SetupError::InvalidParameter {
+                name: format!("nodes.{key}.id"),
+                reason: format!("map key `{key}` does not match embedded id `{}`", node.id),
+            });
+        }
+    }
+    for (key, edge) in &spec.edges {
+        if key != &edge.id {
+            return Err(SetupError::InvalidParameter {
+                name: format!("edges.{key}.id"),
+                reason: format!("map key `{key}` does not match embedded id `{}`", edge.id),
+            });
+        }
+    }
+    let mut nodes = BTreeMap::new();
+    for (id, node) in &spec.nodes {
+        nodes.insert(id.clone(), check_node(id, node)?);
+    }
+    let mut edges = BTreeMap::new();
+    for (id, edge) in &spec.edges {
+        edges.insert(id.clone(), check_edge(id, edge)?);
+    }
+
+    // Preserve the legacy graph passes after local tag/payload reconciliation.
+    for (edge_id, edge) in &spec.edges {
+        if !spec.nodes.contains_key(&edge.from) || !spec.nodes.contains_key(&edge.to) {
+            // Delegate exact legacy reference diagnostics.
+            let _ = compile_scenario_owned(spec.clone())?;
+            unreachable!();
+        }
+        let _ = edge_id;
+    }
+    for (index, condition) in spec.end_conditions.iter().enumerate() {
+        let path = format!("end_conditions[{index}]");
+        validate_end_condition_shape(condition, &path)?;
+        validate_end_condition_references(&spec, condition, &path)?;
+    }
+    validate_transfer_metric_references(&spec)?;
+    validate_tracked_metric_references(&spec)?;
+    validate_resource_connection_cycles(&spec)?;
+    let slots = validate_connection_invariants(&spec)?;
+    validate_node_invariants(&spec)?;
+    validate_variable_sources(&spec)?;
+    let mut expressions = ValidatedExpressions::default();
+    for (id, slot) in spec.edges.keys().zip(slots) {
+        if let Some(expr) = slot.transfer {
+            expressions.transfer.insert(id.clone(), expr);
+        }
+        if let Some(expr) = slot.state {
+            expressions.state.insert(id.clone(), expr);
+        }
+    }
+    Ok(Scenario::from_parts(spec, nodes, edges, expressions))
+}
+
+impl TryFrom<ScenarioSpec> for Scenario {
+    type Error = SetupError;
+    fn try_from(spec: ScenarioSpec) -> Result<Self, Self::Error> {
+        check_scenario(spec)
+    }
+}
+
+fn config_mismatch(id: &NodeId) -> SetupError {
+    SetupError::InvalidParameter {
+        name: format!("nodes.{id}.config"),
+        reason: "config does not match node family".into(),
+    }
+}
+fn nz(value: u64, name: String, reason: &str) -> Result<NonZeroU64, SetupError> {
+    NonZeroU64::new(value)
+        .ok_or_else(|| SetupError::InvalidParameter { name, reason: reason.into() })
+}
+fn check_node(id: &NodeId, node: &NodeSpec) -> Result<ScenarioNode, SetupError> {
+    let mode = |m: &crate::types::NodeModeConfig| m.clone();
+    let behavior = match (&node.kind, &node.config) {
+        (NodeKind::Source, NodeConfig::None) => NodeBehavior::Source,
+        (NodeKind::Pool, NodeConfig::None) => NodeBehavior::Pool(PoolConfig::default()),
+        (NodeKind::Pool, NodeConfig::Pool(c)) => {
+            let mut p = PoolConfig::default()
+                .with_allow_negative_start(c.allow_negative_start)
+                .with_mode(mode(&c.mode));
+            if let Some(v) = c.capacity {
+                p = p.with_capacity(v)
+            }
+            NodeBehavior::Pool(p)
+        }
+        (NodeKind::Drain, NodeConfig::None) => NodeBehavior::Drain(DrainConfig::default()),
+        (NodeKind::Drain, NodeConfig::Drain(c)) => {
+            NodeBehavior::Drain(DrainConfig::default().with_mode(mode(&c.mode)))
+        }
+        (NodeKind::SortingGate, NodeConfig::None) => {
+            NodeBehavior::SortingGate(SortingGateConfig::default())
+        }
+        (NodeKind::SortingGate, NodeConfig::SortingGate(c)) => {
+            NodeBehavior::SortingGate(SortingGateConfig::default().with_mode(mode(&c.mode)))
+        }
+        (NodeKind::TriggerGate, NodeConfig::None) => {
+            NodeBehavior::TriggerGate(TriggerGateConfig::default())
+        }
+        (NodeKind::TriggerGate, NodeConfig::TriggerGate(c)) => {
+            NodeBehavior::TriggerGate(TriggerGateConfig::default().with_mode(mode(&c.mode)))
+        }
+        (NodeKind::MixedGate, NodeConfig::None) => {
+            NodeBehavior::MixedGate(MixedGateConfig::default())
+        }
+        (NodeKind::MixedGate, NodeConfig::MixedGate(c)) => {
+            NodeBehavior::MixedGate(MixedGateConfig::default().with_mode(mode(&c.mode)))
+        }
+        (NodeKind::Converter, NodeConfig::None) => {
+            NodeBehavior::Converter(ConverterConfig::default())
+        }
+        (NodeKind::Converter, NodeConfig::Converter(c)) => NodeBehavior::Converter(
+            ConverterConfig::default()
+                .with_ignore_disabled_inputs(c.ignore_disabled_inputs)
+                .with_mode(mode(&c.mode)),
+        ),
+        (NodeKind::Trader, NodeConfig::None) => NodeBehavior::Trader(TraderConfig::default()),
+        (NodeKind::Trader, NodeConfig::Trader(c)) => NodeBehavior::Trader(
+            TraderConfig::default()
+                .with_ignore_disabled_inputs(c.ignore_disabled_inputs)
+                .with_mode(mode(&c.mode)),
+        ),
+        (NodeKind::Register, NodeConfig::None) => NodeBehavior::Register(RegisterConfig::default()),
+        (NodeKind::Register, NodeConfig::Register(c)) => {
+            let mut r = RegisterConfig::default().with_interactive(c.interactive);
+            if let Some(v) = c.min_value {
+                r = r.with_min_value(v)
+            }
+            if let Some(v) = c.max_value {
+                r = r.with_max_value(v)
+            }
+            NodeBehavior::Register(r)
+        }
+        (NodeKind::Delay, NodeConfig::None) => NodeBehavior::Delay(DelayConfig::default()),
+        (NodeKind::Delay, NodeConfig::Delay(c)) => NodeBehavior::Delay(
+            DelayConfig::default()
+                .with_delay_steps(nz(
+                    c.delay_steps,
+                    format!("nodes.{id}.config.delay_steps"),
+                    "must be greater than 0",
+                )?)
+                .with_mode(mode(&c.mode)),
+        ),
+        (NodeKind::Queue, NodeConfig::None) => NodeBehavior::Queue(QueueConfig::default()),
+        (NodeKind::Queue, NodeConfig::Queue(c)) => {
+            let mut q = QueueConfig::default()
+                .with_release_per_step(nz(
+                    c.release_per_step,
+                    format!("nodes.{id}.config.release_per_step"),
+                    "must be greater than 0",
+                )?)
+                .with_mode(mode(&c.mode));
+            if let Some(v) = c.capacity {
+                q = q.with_capacity(nz(
+                    v,
+                    format!("nodes.{id}.config.capacity"),
+                    "must be greater than 0 when specified",
+                )?)
+            }
+            NodeBehavior::Queue(q)
+        }
+        (NodeKind::Process, NodeConfig::None) => NodeBehavior::Process,
+        (NodeKind::Sink, NodeConfig::None) => NodeBehavior::Sink,
+        (NodeKind::Gate, NodeConfig::None) => NodeBehavior::Gate,
+        (NodeKind::Custom(v), NodeConfig::None) => NodeBehavior::Custom(v.clone()),
+        _ => return Err(config_mismatch(id)),
+    };
+    Ok(ScenarioNode::from_parts(
+        node.id.clone(),
+        behavior,
+        node.label.clone(),
+        node.initial_value,
+        node.tags.clone(),
+        node.metadata.clone(),
+    ))
+}
+fn check_edge(id: &EdgeId, edge: &EdgeSpec) -> Result<ScenarioEdge, SetupError> {
+    let connection = match edge.connection.kind {
+        ConnectionKind::Resource => {
+            if edge.connection.state != Default::default() {
+                return Err(SetupError::InvalidParameter {
+                    name: format!("edges.{id}.connection.state"),
+                    reason: "resource connections cannot declare state connection semantics".into(),
+                });
+            }
+            ConnectionSpec::Resource(ResourceConnection::default().with_token_size(nz(
+                edge.connection.resource.token_size,
+                format!("edges.{id}.connection.resource.token_size"),
+                "must be greater than 0",
+            )?))
+        }
+        ConnectionKind::State => {
+            if edge.connection.resource != Default::default() {
+                return Err(SetupError::InvalidParameter {
+                    name: format!("edges.{id}.connection.resource"),
+                    reason: "state connections cannot customize resource token settings".into(),
+                });
+            }
+            let s = &edge.connection.state;
+            let target = match s.target {
+                StateConnectionTarget::Node => {
+                    if s.target_connection.is_some() {
+                        return Err(SetupError::InvalidParameter {
+                            name: format!("edges.{id}.connection.state.target_connection"),
+                            reason: "node targets cannot also declare a target connection".into(),
+                        });
+                    }
+                    StateTarget::Node
+                }
+                StateConnectionTarget::ResourceConnection => StateTarget::ResourceConnection(
+                    s.target_connection.clone().ok_or_else(|| SetupError::InvalidParameter {
+                        name: format!("edges.{id}.connection.state.target_connection"),
+                        reason: "must be set for this target kind".into(),
+                    })?,
+                ),
+                StateConnectionTarget::StateConnection => {
+                    StateTarget::StateConnection(s.target_connection.clone().ok_or_else(|| {
+                        SetupError::InvalidParameter {
+                            name: format!("edges.{id}.connection.state.target_connection"),
+                            reason: "must be set for this target kind".into(),
+                        }
+                    })?)
+                }
+                StateConnectionTarget::Formula => {
+                    StateTarget::Formula(s.target_connection.clone().ok_or_else(|| {
+                        SetupError::InvalidParameter {
+                            name: format!("edges.{id}.connection.state.target_connection"),
+                            reason: "must be set for this target kind".into(),
+                        }
+                    })?)
+                }
+            };
+            let mut c = StateConnection::new(s.role.clone(), s.formula.clone(), target);
+            if let Some(f) = &s.resource_filter {
+                c = c.with_resource_filter(f.clone())
+            }
+            ConnectionSpec::State(c)
+        }
+    };
+    Ok(ScenarioEdge::from_parts(
+        edge.id.clone(),
+        edge.from.clone(),
+        edge.to.clone(),
+        edge.transfer.clone(),
+        connection,
+        edge.enabled,
+        edge.metadata.clone(),
+    ))
 }
 
 /// Rejects zero `max_steps` and malformed typed capture selections on a [`RunConfig`].
@@ -397,10 +658,11 @@ fn detect_cycle_from(
 
 fn validate_connection_invariants(spec: &ScenarioSpec) -> Result<Vec<ExpressionSlots>, SetupError> {
     let mut expressions = Vec::with_capacity(spec.edges.len());
+    let runtime = ExprRuntime::new();
     for (edge_id, edge) in &spec.edges {
         let transfer = match edge.connection.kind {
             ConnectionKind::Resource => {
-                let transfer = validate_resource_connection_invariants(edge_id, edge)?;
+                let transfer = validate_resource_connection_invariants(&runtime, edge_id, edge)?;
                 if edge.connection.state != Default::default() {
                     return Err(SetupError::InvalidParameter {
                         name: format!("edges.{edge_id}.connection.state"),
@@ -413,7 +675,9 @@ fn validate_connection_invariants(spec: &ScenarioSpec) -> Result<Vec<ExpressionS
             ConnectionKind::State => None,
         };
         let state = match edge.connection.kind {
-            ConnectionKind::State => validate_state_connection_invariants(spec, edge_id, edge)?,
+            ConnectionKind::State => {
+                validate_state_connection_invariants(&runtime, spec, edge_id, edge)?
+            }
             ConnectionKind::Resource => None,
         };
         expressions.push(ExpressionSlots { transfer, state });
@@ -423,6 +687,7 @@ fn validate_connection_invariants(spec: &ScenarioSpec) -> Result<Vec<ExpressionS
 }
 
 fn validate_resource_connection_invariants(
+    runtime: &ExprRuntime,
     edge_id: &EdgeId,
     edge: &EdgeSpec,
 ) -> Result<Option<crate::expr::CompiledExpr>, SetupError> {
@@ -456,9 +721,11 @@ fn validate_resource_connection_invariants(
     }
 
     let expression = match &edge.transfer {
-        TransferSpec::Expression { formula } => {
-            Some(validate_formula(format!("edges.{edge_id}.transfer.expression.formula"), formula)?)
-        }
+        TransferSpec::Expression { formula } => Some(validate_formula(
+            runtime,
+            format!("edges.{edge_id}.transfer.expression.formula"),
+            formula,
+        )?),
         _ => None,
     };
     Ok(expression)
@@ -468,6 +735,7 @@ fn validate_resource_connection_invariants(
 /// node values without timeline `record_arrival`/`record_release`, which desyncs
 /// scheduled tokens from physical inventory.
 fn validate_state_connection_invariants(
+    runtime: &ExprRuntime,
     spec: &ScenarioSpec,
     edge_id: &EdgeId,
     edge: &EdgeSpec,
@@ -496,7 +764,11 @@ fn validate_state_connection_invariants(
     }
 
     let expression = if matches!(state.role, StateConnectionRole::Modifier) {
-        Some(validate_formula(format!("edges.{edge_id}.connection.state.formula"), formula)?)
+        Some(validate_formula(
+            runtime,
+            format!("edges.{edge_id}.connection.state.formula"),
+            formula,
+        )?)
     } else {
         None
     };
@@ -612,8 +884,12 @@ fn formula_has_explicit_sign(formula: &str) -> bool {
     matches!(formula.chars().next(), Some('+') | Some('-'))
 }
 
-fn validate_formula(name: String, formula: &str) -> Result<crate::expr::CompiledExpr, SetupError> {
-    ExprRuntime::new().compile(formula).map_err(|error| SetupError::InvalidParameter {
+fn validate_formula(
+    runtime: &ExprRuntime,
+    name: String,
+    formula: &str,
+) -> Result<crate::expr::CompiledExpr, SetupError> {
+    runtime.compile(formula).map_err(|error| SetupError::InvalidParameter {
         name,
         reason: format!("invalid expression: {error}"),
     })

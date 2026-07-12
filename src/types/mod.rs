@@ -9,12 +9,14 @@ mod config;
 mod identifiers;
 mod reports;
 mod scenario;
+mod scenario_checked;
 
 pub use artifacts::*;
 pub use config::*;
 pub use identifiers::*;
 pub use reports::*;
 pub use scenario::*;
+pub use scenario_checked::*;
 
 #[cfg(test)]
 mod tests {
