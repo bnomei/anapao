@@ -210,6 +210,7 @@ pub mod expr;
 mod plan;
 pub mod prelude;
 pub mod rng;
+mod scenario_macro;
 pub mod simulator;
 pub mod stats;
 pub mod stochastic;
