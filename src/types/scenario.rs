@@ -378,12 +378,14 @@ impl NodeSpec {
     }
 
     /// Sets the node's initial value.
+    #[must_use = "scenario authoring methods return a new value; use the result"]
     pub fn with_initial_value(mut self, initial_value: f64) -> Self {
         self.initial_value = initial_value;
         self
     }
 
     /// Replaces the node's family-specific config.
+    #[must_use = "scenario authoring methods return a new value; use the result"]
     pub fn with_config(mut self, config: NodeConfig) -> Self {
         self.config = config;
         self
@@ -418,6 +420,7 @@ impl EdgeSpec {
     }
 
     /// Replaces edge connection settings.
+    #[must_use = "scenario authoring methods return a new value; use the result"]
     pub fn with_connection(mut self, connection: EdgeConnectionConfig) -> Self {
         self.connection = connection;
         self
@@ -549,24 +552,28 @@ impl ScenarioSpec {
     }
 
     /// Inserts or replaces a node by id.
+    #[must_use = "scenario authoring methods return a new value; use the result"]
     pub fn with_node(mut self, node: NodeSpec) -> Self {
         self.nodes.insert(node.id.clone(), node);
         self
     }
 
     /// Inserts or replaces an edge by id.
+    #[must_use = "scenario authoring methods return a new value; use the result"]
     pub fn with_edge(mut self, edge: EdgeSpec) -> Self {
         self.edges.insert(edge.id.clone(), edge);
         self
     }
 
     /// Replaces all end conditions with one condition.
+    #[must_use = "scenario authoring methods return a new value; use the result"]
     pub fn with_end_condition(mut self, condition: EndConditionSpec) -> Self {
         self.end_conditions = vec![condition];
         self
     }
 
     /// Replaces all end conditions with a provided ordered list.
+    #[must_use = "scenario authoring methods return a new value; use the result"]
     pub fn with_end_conditions<I>(mut self, conditions: I) -> Self
     where
         I: IntoIterator<Item = EndConditionSpec>,
@@ -576,8 +583,51 @@ impl ScenarioSpec {
     }
 
     /// Appends an additional end condition to the existing list.
+    #[must_use = "scenario authoring methods return a new value; use the result"]
     pub fn push_end_condition(mut self, condition: EndConditionSpec) -> Self {
         self.end_conditions.push(condition);
+        self
+    }
+
+    /// Sets the optional human-readable scenario title.
+    #[must_use = "scenario authoring methods return a new value; use the result"]
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+
+    /// Sets the optional human-readable scenario description.
+    #[must_use = "scenario authoring methods return a new value; use the result"]
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    /// Adds a scenario tag.
+    #[must_use = "scenario authoring methods return a new value; use the result"]
+    pub fn with_tag(mut self, tag: impl Into<String>) -> Self {
+        self.tags.insert(tag.into());
+        self
+    }
+
+    /// Replaces the runtime variable configuration.
+    #[must_use = "scenario authoring methods return a new value; use the result"]
+    pub fn with_variables(mut self, variables: VariableRuntimeConfig) -> Self {
+        self.variables = variables;
+        self
+    }
+
+    /// Adds one terminal metric to retain in scenario reports.
+    #[must_use = "scenario authoring methods return a new value; use the result"]
+    pub fn with_tracked_metric(mut self, metric: MetricKey) -> Self {
+        self.tracked_metrics.insert(metric);
+        self
+    }
+
+    /// Adds or replaces one string metadata entry.
+    #[must_use = "scenario authoring methods return a new value; use the result"]
+    pub fn with_metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.metadata.insert(key.into(), value.into());
         self
     }
 }

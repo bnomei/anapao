@@ -3,14 +3,18 @@
 //! This module deliberately has no serde derives.  [`ScenarioSpec`] remains the
 //! stable document contract; a [`Scenario`] is the boundary after validation.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{btree_map::Entry, BTreeMap, BTreeSet};
 use std::num::NonZeroU64;
 
 use crate::expr::CompiledExpr;
 
 use super::{
-    EdgeId, NodeId, NodeModeConfig, ScenarioId, ScenarioSpec, StateConnectionRole, TransferSpec,
+    ConnectionKind, EdgeConnectionConfig, EdgeId, EdgeSpec, EndConditionSpec, MetricKey,
+    NodeConfig, NodeId, NodeKind, NodeModeConfig, NodeSpec, PoolNodeConfig, ScenarioId,
+    ScenarioSpec, StateConnectionConfig, StateConnectionRole, StateConnectionTarget, TransferSpec,
+    VariableRuntimeConfig,
 };
+use crate::error::SetupError;
 
 macro_rules! mode_config {
     ($name:ident) => {
@@ -22,7 +26,7 @@ macro_rules! mode_config {
             pub fn mode(&self) -> &NodeModeConfig {
                 &self.mode
             }
-            #[must_use]
+            #[must_use = "checked configuration methods return a new value; use the result"]
             pub fn with_mode(mut self, mode: NodeModeConfig) -> Self {
                 self.mode = mode;
                 self
@@ -47,22 +51,22 @@ impl PoolConfig {
     pub fn mode(&self) -> &NodeModeConfig {
         &self.mode
     }
-    #[must_use]
+    #[must_use = "checked configuration methods return a new value; use the result"]
     pub fn with_capacity(mut self, capacity: u64) -> Self {
         self.capacity = Some(capacity);
         self
     }
-    #[must_use]
+    #[must_use = "checked configuration methods return a new value; use the result"]
     pub fn without_capacity(mut self) -> Self {
         self.capacity = None;
         self
     }
-    #[must_use]
+    #[must_use = "checked configuration methods return a new value; use the result"]
     pub fn with_allow_negative_start(mut self, value: bool) -> Self {
         self.allow_negative_start = value;
         self
     }
-    #[must_use]
+    #[must_use = "checked configuration methods return a new value; use the result"]
     pub fn with_mode(mut self, mode: NodeModeConfig) -> Self {
         self.mode = mode;
         self
@@ -85,12 +89,12 @@ impl ConverterConfig {
     pub fn mode(&self) -> &NodeModeConfig {
         &self.mode
     }
-    #[must_use]
+    #[must_use = "checked configuration methods return a new value; use the result"]
     pub fn with_ignore_disabled_inputs(mut self, v: bool) -> Self {
         self.ignore_disabled_inputs = v;
         self
     }
-    #[must_use]
+    #[must_use = "checked configuration methods return a new value; use the result"]
     pub fn with_mode(mut self, v: NodeModeConfig) -> Self {
         self.mode = v;
         self
@@ -108,12 +112,12 @@ impl TraderConfig {
     pub fn mode(&self) -> &NodeModeConfig {
         &self.mode
     }
-    #[must_use]
+    #[must_use = "checked configuration methods return a new value; use the result"]
     pub fn with_ignore_disabled_inputs(mut self, v: bool) -> Self {
         self.ignore_disabled_inputs = v;
         self
     }
-    #[must_use]
+    #[must_use = "checked configuration methods return a new value; use the result"]
     pub fn with_mode(mut self, v: NodeModeConfig) -> Self {
         self.mode = v;
         self
@@ -135,27 +139,27 @@ impl RegisterConfig {
     pub fn max_value(&self) -> Option<i64> {
         self.max_value
     }
-    #[must_use]
+    #[must_use = "checked configuration methods return a new value; use the result"]
     pub fn with_interactive(mut self, v: bool) -> Self {
         self.interactive = v;
         self
     }
-    #[must_use]
+    #[must_use = "checked configuration methods return a new value; use the result"]
     pub fn with_min_value(mut self, v: i64) -> Self {
         self.min_value = Some(v);
         self
     }
-    #[must_use]
+    #[must_use = "checked configuration methods return a new value; use the result"]
     pub fn without_min_value(mut self) -> Self {
         self.min_value = None;
         self
     }
-    #[must_use]
+    #[must_use = "checked configuration methods return a new value; use the result"]
     pub fn with_max_value(mut self, v: i64) -> Self {
         self.max_value = Some(v);
         self
     }
-    #[must_use]
+    #[must_use = "checked configuration methods return a new value; use the result"]
     pub fn without_max_value(mut self) -> Self {
         self.max_value = None;
         self
@@ -178,12 +182,12 @@ impl DelayConfig {
     pub fn mode(&self) -> &NodeModeConfig {
         &self.mode
     }
-    #[must_use]
+    #[must_use = "checked configuration methods return a new value; use the result"]
     pub fn with_delay_steps(mut self, v: NonZeroU64) -> Self {
         self.delay_steps = v;
         self
     }
-    #[must_use]
+    #[must_use = "checked configuration methods return a new value; use the result"]
     pub fn with_mode(mut self, v: NodeModeConfig) -> Self {
         self.mode = v;
         self
@@ -210,22 +214,22 @@ impl QueueConfig {
     pub fn mode(&self) -> &NodeModeConfig {
         &self.mode
     }
-    #[must_use]
+    #[must_use = "checked configuration methods return a new value; use the result"]
     pub fn with_capacity(mut self, v: NonZeroU64) -> Self {
         self.capacity = Some(v);
         self
     }
-    #[must_use]
+    #[must_use = "checked configuration methods return a new value; use the result"]
     pub fn without_capacity(mut self) -> Self {
         self.capacity = None;
         self
     }
-    #[must_use]
+    #[must_use = "checked configuration methods return a new value; use the result"]
     pub fn with_release_per_step(mut self, v: NonZeroU64) -> Self {
         self.release_per_step = v;
         self
     }
-    #[must_use]
+    #[must_use = "checked configuration methods return a new value; use the result"]
     pub fn with_mode(mut self, v: NodeModeConfig) -> Self {
         self.mode = v;
         self
@@ -335,22 +339,22 @@ impl ScenarioNode {
     pub fn custom(id: NodeId, v: impl Into<String>) -> Self {
         Self::new(id, NodeBehavior::Custom(v.into()))
     }
-    #[must_use]
+    #[must_use = "checked configuration methods return a new value; use the result"]
     pub fn with_label(mut self, v: impl Into<String>) -> Self {
         self.label = Some(v.into());
         self
     }
-    #[must_use]
+    #[must_use = "checked configuration methods return a new value; use the result"]
     pub fn with_initial_value(mut self, v: f64) -> Self {
         self.initial_value = v;
         self
     }
-    #[must_use]
+    #[must_use = "checked configuration methods return a new value; use the result"]
     pub fn with_tag(mut self, v: impl Into<String>) -> Self {
         self.tags.insert(v.into());
         self
     }
-    #[must_use]
+    #[must_use = "checked configuration methods return a new value; use the result"]
     pub fn with_metadata(mut self, k: impl Into<String>, v: impl Into<String>) -> Self {
         self.metadata.insert(k.into(), v.into());
         self
@@ -380,7 +384,7 @@ impl ResourceConnection {
     pub fn token_size(&self) -> NonZeroU64 {
         self.token_size
     }
-    #[must_use]
+    #[must_use = "checked configuration methods return a new value; use the result"]
     pub fn with_token_size(mut self, v: NonZeroU64) -> Self {
         self.token_size = v;
         self
@@ -427,22 +431,22 @@ impl StateConnection {
     pub fn resource_filter(&self) -> Option<&str> {
         self.resource_filter.as_deref()
     }
-    #[must_use]
+    #[must_use = "checked configuration methods return a new value; use the result"]
     pub fn with_role(mut self, v: StateConnectionRole) -> Self {
         self.role = v;
         self
     }
-    #[must_use]
+    #[must_use = "checked configuration methods return a new value; use the result"]
     pub fn with_formula(mut self, v: impl Into<String>) -> Self {
         self.formula = v.into();
         self
     }
-    #[must_use]
+    #[must_use = "checked configuration methods return a new value; use the result"]
     pub fn with_target(mut self, v: StateTarget) -> Self {
         self.target = v;
         self
     }
-    #[must_use]
+    #[must_use = "checked configuration methods return a new value; use the result"]
     pub fn with_resource_filter(mut self, v: impl Into<String>) -> Self {
         self.resource_filter = Some(v.into());
         self
@@ -513,12 +517,12 @@ impl ScenarioEdge {
     pub fn metadata(&self) -> &BTreeMap<String, String> {
         &self.metadata
     }
-    #[must_use]
+    #[must_use = "checked edge authoring methods return a new value; use the result"]
     pub fn with_enabled(mut self, v: bool) -> Self {
         self.enabled = v;
         self
     }
-    #[must_use]
+    #[must_use = "checked edge authoring methods return a new value; use the result"]
     pub fn with_metadata(mut self, k: impl Into<String>, v: impl Into<String>) -> Self {
         self.metadata.insert(k.into(), v.into());
         self
@@ -533,6 +537,274 @@ impl ScenarioEdge {
         metadata: BTreeMap<String, String>,
     ) -> Self {
         Self { id, from, to, transfer, connection, enabled, metadata }
+    }
+}
+
+/// Conventional checked authoring surface for a complete scenario document.
+///
+/// Unlike the legacy [`ScenarioSpec`] helpers, duplicate node and edge identifiers are rejected
+/// and the first definition is retained.
+///
+/// ```
+/// use anapao::types::{
+///     EdgeId, NodeId, ResourceConnection, ScenarioBuilder, ScenarioEdge, ScenarioId,
+///     ScenarioNode, TransferSpec,
+/// };
+///
+/// let source = NodeId::fixture("source");
+/// let sink = NodeId::fixture("sink");
+/// let scenario = ScenarioBuilder::new(ScenarioId::fixture("authored"))
+///     .with_node(ScenarioNode::source(source.clone()).with_initial_value(1.0))?
+///     .with_node(ScenarioNode::sink(sink.clone()))?
+///     .with_edge(ScenarioEdge::resource(
+///         EdgeId::fixture("source-sink"),
+///         source,
+///         sink,
+///         TransferSpec::Fixed { amount: 1.0 },
+///         ResourceConnection::default(),
+///     ))?
+///     .build()?;
+/// assert_eq!(scenario.nodes().len(), 2);
+/// # Ok::<(), anapao::error::SetupError>(())
+/// ```
+///
+/// ```compile_fail
+/// #![deny(unused_must_use)]
+/// use anapao::types::{NodeId, ScenarioNode};
+/// ScenarioNode::source(NodeId::fixture("source")).with_tag("discarded");
+/// ```
+///
+/// ```compile_fail
+/// #![deny(unused_must_use)]
+/// use anapao::types::{NodeId, NodeKind, NodeSpec};
+/// NodeSpec::new(NodeId::fixture("source"), NodeKind::Source).with_initial_value(1.0);
+/// ```
+#[must_use = "a ScenarioBuilder must be built or otherwise used"]
+#[derive(Debug, Clone)]
+pub struct ScenarioBuilder {
+    draft: ScenarioSpec,
+}
+
+impl ScenarioBuilder {
+    /// Starts an empty scenario using [`ScenarioSpec::new`] document defaults.
+    pub fn new(id: ScenarioId) -> Self {
+        Self { draft: ScenarioSpec::new(id) }
+    }
+
+    /// Inserts a checked node, rejecting a duplicate without replacing the original value.
+    pub fn insert_node(&mut self, node: ScenarioNode) -> Result<(), SetupError> {
+        let id = node.id().clone();
+        match self.draft.nodes.entry(id.clone()) {
+            Entry::Vacant(slot) => {
+                slot.insert(node.into());
+                Ok(())
+            }
+            Entry::Occupied(_) => Err(duplicate_error("nodes", id.as_ref())),
+        }
+    }
+
+    /// Inserts a checked edge, rejecting a duplicate without replacing the original value.
+    pub fn insert_edge(&mut self, edge: ScenarioEdge) -> Result<(), SetupError> {
+        let id = edge.id().clone();
+        match self.draft.edges.entry(id.clone()) {
+            Entry::Vacant(slot) => {
+                slot.insert(edge.into());
+                Ok(())
+            }
+            Entry::Occupied(_) => Err(duplicate_error("edges", id.as_ref())),
+        }
+    }
+
+    #[must_use = "ScenarioBuilder methods return a new builder; use the result"]
+    pub fn with_node(mut self, node: ScenarioNode) -> Result<Self, SetupError> {
+        self.insert_node(node)?;
+        Ok(self)
+    }
+
+    #[must_use = "ScenarioBuilder methods return a new builder; use the result"]
+    pub fn with_edge(mut self, edge: ScenarioEdge) -> Result<Self, SetupError> {
+        self.insert_edge(edge)?;
+        Ok(self)
+    }
+
+    #[must_use = "ScenarioBuilder methods return a new builder; use the result"]
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.draft.title = Some(title.into());
+        self
+    }
+
+    #[must_use = "ScenarioBuilder methods return a new builder; use the result"]
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.draft.description = Some(description.into());
+        self
+    }
+
+    #[must_use = "ScenarioBuilder methods return a new builder; use the result"]
+    pub fn with_tag(mut self, tag: impl Into<String>) -> Self {
+        self.draft.tags.insert(tag.into());
+        self
+    }
+
+    #[must_use = "ScenarioBuilder methods return a new builder; use the result"]
+    pub fn with_variables(mut self, variables: VariableRuntimeConfig) -> Self {
+        self.draft.variables = variables;
+        self
+    }
+
+    #[must_use = "ScenarioBuilder methods return a new builder; use the result"]
+    pub fn with_end_condition(mut self, condition: EndConditionSpec) -> Self {
+        self.draft.end_conditions = vec![condition];
+        self
+    }
+
+    #[must_use = "ScenarioBuilder methods return a new builder; use the result"]
+    pub fn with_end_conditions<I>(mut self, conditions: I) -> Self
+    where
+        I: IntoIterator<Item = EndConditionSpec>,
+    {
+        self.draft.end_conditions = conditions.into_iter().collect();
+        self
+    }
+
+    #[must_use = "ScenarioBuilder methods return a new builder; use the result"]
+    pub fn push_end_condition(mut self, condition: EndConditionSpec) -> Self {
+        self.draft.end_conditions.push(condition);
+        self
+    }
+
+    #[must_use = "ScenarioBuilder methods return a new builder; use the result"]
+    pub fn with_tracked_metric(mut self, metric: MetricKey) -> Self {
+        self.draft.tracked_metrics.insert(metric);
+        self
+    }
+
+    #[must_use = "ScenarioBuilder methods return a new builder; use the result"]
+    pub fn with_metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.draft.metadata.insert(key.into(), value.into());
+        self
+    }
+
+    /// Validates the complete draft once, through the shared checked conversion gate.
+    pub fn build(self) -> Result<Scenario, SetupError> {
+        Scenario::try_from(self.draft)
+    }
+}
+
+fn duplicate_error(kind: &str, id: &str) -> SetupError {
+    SetupError::InvalidParameter {
+        name: format!("{kind}.{id}"),
+        reason: "a definition with this id already exists".into(),
+    }
+}
+
+impl From<ScenarioNode> for NodeSpec {
+    fn from(node: ScenarioNode) -> Self {
+        let ScenarioNode { id, behavior, label, initial_value, tags, metadata } = node;
+        let (kind, config) = match behavior {
+            NodeBehavior::Source => (NodeKind::Source, NodeConfig::None),
+            NodeBehavior::Pool(c) => (
+                NodeKind::Pool,
+                NodeConfig::Pool(PoolNodeConfig {
+                    capacity: c.capacity,
+                    allow_negative_start: c.allow_negative_start,
+                    mode: c.mode,
+                }),
+            ),
+            NodeBehavior::Drain(c) => {
+                (NodeKind::Drain, NodeConfig::Drain(super::DrainNodeConfig { mode: c.mode }))
+            }
+            NodeBehavior::SortingGate(c) => (
+                NodeKind::SortingGate,
+                NodeConfig::SortingGate(super::SortingGateNodeConfig { mode: c.mode }),
+            ),
+            NodeBehavior::TriggerGate(c) => (
+                NodeKind::TriggerGate,
+                NodeConfig::TriggerGate(super::TriggerGateNodeConfig { mode: c.mode }),
+            ),
+            NodeBehavior::MixedGate(c) => (
+                NodeKind::MixedGate,
+                NodeConfig::MixedGate(super::MixedGateNodeConfig { mode: c.mode }),
+            ),
+            NodeBehavior::Converter(c) => (
+                NodeKind::Converter,
+                NodeConfig::Converter(super::ConverterNodeConfig {
+                    ignore_disabled_inputs: c.ignore_disabled_inputs,
+                    mode: c.mode,
+                }),
+            ),
+            NodeBehavior::Trader(c) => (
+                NodeKind::Trader,
+                NodeConfig::Trader(super::TraderNodeConfig {
+                    ignore_disabled_inputs: c.ignore_disabled_inputs,
+                    mode: c.mode,
+                }),
+            ),
+            NodeBehavior::Register(c) => (
+                NodeKind::Register,
+                NodeConfig::Register(super::RegisterNodeConfig {
+                    interactive: c.interactive,
+                    min_value: c.min_value,
+                    max_value: c.max_value,
+                }),
+            ),
+            NodeBehavior::Delay(c) => (
+                NodeKind::Delay,
+                NodeConfig::Delay(super::DelayNodeConfig {
+                    delay_steps: c.delay_steps.get(),
+                    mode: c.mode,
+                }),
+            ),
+            NodeBehavior::Queue(c) => (
+                NodeKind::Queue,
+                NodeConfig::Queue(super::QueueNodeConfig {
+                    capacity: c.capacity.map(NonZeroU64::get),
+                    release_per_step: c.release_per_step.get(),
+                    mode: c.mode,
+                }),
+            ),
+            NodeBehavior::Process => (NodeKind::Process, NodeConfig::None),
+            NodeBehavior::Sink => (NodeKind::Sink, NodeConfig::None),
+            NodeBehavior::Gate => (NodeKind::Gate, NodeConfig::None),
+            NodeBehavior::Custom(value) => (NodeKind::Custom(value), NodeConfig::None),
+        };
+        NodeSpec { id, kind, config, label, initial_value, tags, metadata }
+    }
+}
+
+impl From<ScenarioEdge> for EdgeSpec {
+    fn from(edge: ScenarioEdge) -> Self {
+        let ScenarioEdge { id, from, to, transfer, connection, enabled, metadata } = edge;
+        let connection = match connection {
+            ConnectionSpec::Resource(resource) => EdgeConnectionConfig {
+                kind: ConnectionKind::Resource,
+                resource: super::ResourceConnectionConfig { token_size: resource.token_size.get() },
+                state: StateConnectionConfig::default(),
+            },
+            ConnectionSpec::State(state) => {
+                let (target, target_connection) = match state.target {
+                    StateTarget::Node => (StateConnectionTarget::Node, None),
+                    StateTarget::ResourceConnection(id) => {
+                        (StateConnectionTarget::ResourceConnection, Some(id))
+                    }
+                    StateTarget::StateConnection(id) => {
+                        (StateConnectionTarget::StateConnection, Some(id))
+                    }
+                    StateTarget::Formula(id) => (StateConnectionTarget::Formula, Some(id)),
+                };
+                EdgeConnectionConfig {
+                    kind: ConnectionKind::State,
+                    resource: super::ResourceConnectionConfig::default(),
+                    state: StateConnectionConfig {
+                        role: state.role,
+                        formula: state.formula,
+                        target,
+                        target_connection,
+                        resource_filter: state.resource_filter,
+                    },
+                }
+            }
+        };
+        EdgeSpec { id, from, to, transfer, connection, enabled, metadata }
     }
 }
 
@@ -603,6 +875,172 @@ mod tests {
             checked.nodes()[&NodeId::fixture("source")].behavior(),
             NodeBehavior::Source
         ));
+    }
+
+    #[test]
+    fn scenario_builder_supports_mutating_and_consuming_authoring() {
+        let source = NodeId::fixture("source");
+        let sink = NodeId::fixture("sink");
+        let edge = EdgeId::fixture("source-sink");
+
+        let mut mutating = ScenarioBuilder::new(ScenarioId::fixture("builder"));
+        mutating.insert_node(ScenarioNode::source(source.clone()).with_initial_value(1.0)).unwrap();
+        mutating.insert_node(ScenarioNode::sink(sink.clone())).unwrap();
+        mutating
+            .insert_edge(ScenarioEdge::resource(
+                edge.clone(),
+                source.clone(),
+                sink.clone(),
+                TransferSpec::Fixed { amount: 1.0 },
+                ResourceConnection::default(),
+            ))
+            .unwrap();
+        let mutating = mutating
+            .with_title("A builder")
+            .with_description("checked authoring")
+            .with_tag("example")
+            .with_variables(VariableRuntimeConfig::default())
+            .with_end_conditions([EndConditionSpec::MaxSteps { steps: 2 }])
+            .push_end_condition(EndConditionSpec::NodeAtLeast {
+                node_id: sink.clone(),
+                value_scaled: 1,
+            })
+            .with_tracked_metric(MetricKey::fixture("sink"))
+            .with_metadata("source", "unit")
+            .build()
+            .unwrap();
+
+        let consuming = ScenarioBuilder::new(ScenarioId::fixture("builder"))
+            .with_node(ScenarioNode::source(source.clone()).with_initial_value(1.0))
+            .unwrap()
+            .with_node(ScenarioNode::sink(sink.clone()))
+            .unwrap()
+            .with_edge(ScenarioEdge::resource(
+                edge,
+                source,
+                sink.clone(),
+                TransferSpec::Fixed { amount: 1.0 },
+                ResourceConnection::default(),
+            ))
+            .unwrap()
+            .with_title("A builder")
+            .with_description("checked authoring")
+            .with_tag("example")
+            .with_variables(VariableRuntimeConfig::default())
+            .with_end_conditions([EndConditionSpec::MaxSteps { steps: 2 }])
+            .push_end_condition(EndConditionSpec::NodeAtLeast { node_id: sink, value_scaled: 1 })
+            .with_tracked_metric(MetricKey::fixture("sink"))
+            .with_metadata("source", "unit")
+            .build()
+            .unwrap();
+
+        assert_eq!(ScenarioSpec::from(mutating), ScenarioSpec::from(consuming));
+    }
+
+    #[test]
+    fn scenario_builder_duplicate_insertion_keeps_the_first_definition() {
+        let source = NodeId::fixture("source");
+        let sink = NodeId::fixture("sink");
+        let mut builder = ScenarioBuilder::new(ScenarioId::fixture("duplicates"));
+        let first_node = ScenarioNode::source(source.clone())
+            .with_label("first source")
+            .with_initial_value(1.0)
+            .with_tag("retained")
+            .with_metadata("definition", "first");
+        builder.insert_node(first_node.clone()).unwrap();
+        let node_error = builder
+            .insert_node(
+                ScenarioNode::custom(source.clone(), "replacement")
+                    .with_label("second source")
+                    .with_initial_value(2.0)
+                    .with_tag("rejected")
+                    .with_metadata("definition", "second"),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(node_error, SetupError::InvalidParameter { ref name, .. } if name == "nodes.source")
+        );
+        builder.insert_node(ScenarioNode::sink(sink.clone())).unwrap();
+
+        let edge_id = EdgeId::fixture("source-sink");
+        let first_edge = ScenarioEdge::resource(
+            edge_id.clone(),
+            source.clone(),
+            sink,
+            TransferSpec::Fixed { amount: 1.0 },
+            ResourceConnection::default(),
+        )
+        .with_metadata("definition", "first");
+        builder.insert_edge(first_edge.clone()).unwrap();
+        let edge_error = builder
+            .insert_edge(
+                ScenarioEdge::resource(
+                    edge_id.clone(),
+                    source.clone(),
+                    source.clone(),
+                    TransferSpec::Fixed { amount: 2.0 },
+                    ResourceConnection::default().with_token_size(NonZeroU64::new(2).unwrap()),
+                )
+                .with_enabled(false)
+                .with_metadata("definition", "second"),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(edge_error, SetupError::InvalidParameter { ref name, .. } if name == "edges.source-sink")
+        );
+
+        let scenario = builder.build().unwrap();
+        assert_eq!(&scenario.nodes()[&source], &first_node);
+        assert_eq!(&scenario.edges()[&edge_id], &first_edge);
+    }
+
+    #[test]
+    fn scenario_builder_consuming_duplicates_return_errors() {
+        let source = NodeId::fixture("source");
+        let node_error = ScenarioBuilder::new(ScenarioId::fixture("duplicate-node"))
+            .with_node(ScenarioNode::source(source.clone()))
+            .unwrap()
+            .with_node(ScenarioNode::custom(source.clone(), "replacement"))
+            .unwrap_err();
+        assert!(
+            matches!(node_error, SetupError::InvalidParameter { ref name, .. } if name == "nodes.source")
+        );
+
+        let sink = NodeId::fixture("sink");
+        let edge_id = EdgeId::fixture("source-sink");
+        let edge_error = ScenarioBuilder::new(ScenarioId::fixture("duplicate-edge"))
+            .with_node(ScenarioNode::source(source.clone()))
+            .unwrap()
+            .with_node(ScenarioNode::sink(sink.clone()))
+            .unwrap()
+            .with_edge(ScenarioEdge::resource(
+                edge_id.clone(),
+                source.clone(),
+                sink.clone(),
+                TransferSpec::Fixed { amount: 1.0 },
+                ResourceConnection::default(),
+            ))
+            .unwrap()
+            .with_edge(ScenarioEdge::resource(
+                edge_id,
+                source,
+                sink,
+                TransferSpec::Fixed { amount: 2.0 },
+                ResourceConnection::default(),
+            ))
+            .unwrap_err();
+        assert!(
+            matches!(edge_error, SetupError::InvalidParameter { ref name, .. } if name == "edges.source-sink")
+        );
+    }
+
+    #[test]
+    fn legacy_dto_helpers_still_replace_by_identifier() {
+        let id = NodeId::fixture("source");
+        let spec = ScenarioSpec::new(ScenarioId::fixture("legacy"))
+            .with_node(NodeSpec::new(id.clone(), NodeKind::Source).with_initial_value(1.0))
+            .with_node(NodeSpec::new(id.clone(), NodeKind::Source).with_initial_value(2.0));
+        assert_eq!(spec.nodes[&id].initial_value, 2.0);
     }
 
     #[test]
@@ -796,14 +1234,16 @@ mod tests {
             ("formula-target", StateConnectionTarget::Formula, Some(resource_id.clone())),
         ] {
             let id = if name == "state-target" { state_id.clone() } else { EdgeId::fixture(name) };
-            let mut connection = EdgeConnectionConfig::default();
-            connection.kind = ConnectionKind::State;
-            connection.state = StateConnectionConfig {
-                role: StateConnectionRole::Modifier,
-                formula: "+1".into(),
-                target,
-                target_connection,
-                resource_filter: None,
+            let connection = EdgeConnectionConfig {
+                kind: ConnectionKind::State,
+                state: StateConnectionConfig {
+                    role: StateConnectionRole::Modifier,
+                    formula: "+1".into(),
+                    target,
+                    target_connection,
+                    resource_filter: None,
+                },
+                ..Default::default()
             };
             spec = spec.with_edge(
                 EdgeSpec::new(id, source.clone(), sink.clone(), TransferSpec::Remaining)
@@ -876,16 +1316,17 @@ mod tests {
                 false,
             ),
         ] {
-            let mut connection = EdgeConnectionConfig::default();
-            connection.kind = ConnectionKind::State;
-            connection.state = StateConnectionConfig {
-                role: StateConnectionRole::Modifier,
-                formula: "+1".into(),
-                target: StateConnectionTarget::Node,
-                target_connection,
-                resource_filter: None,
+            let connection = EdgeConnectionConfig {
+                kind: ConnectionKind::State,
+                state: StateConnectionConfig {
+                    role: StateConnectionRole::Modifier,
+                    formula: "+1".into(),
+                    target,
+                    target_connection,
+                    resource_filter: None,
+                },
+                ..Default::default()
             };
-            connection.state.target = target;
             let mut edge = EdgeSpec::new(
                 id,
                 source.clone(),
@@ -903,14 +1344,16 @@ mod tests {
             ("activator", StateConnectionRole::Activator, None),
             ("filter", StateConnectionRole::Filter, Some("any")),
         ] {
-            let mut connection = EdgeConnectionConfig::default();
-            connection.kind = ConnectionKind::State;
-            connection.state = StateConnectionConfig {
-                role,
-                formula: "not parsed".into(),
-                target: StateConnectionTarget::Node,
-                target_connection: None,
-                resource_filter: resource_filter.map(str::to_owned),
+            let connection = EdgeConnectionConfig {
+                kind: ConnectionKind::State,
+                state: StateConnectionConfig {
+                    role,
+                    formula: "not parsed".into(),
+                    target: StateConnectionTarget::Node,
+                    target_connection: None,
+                    resource_filter: resource_filter.map(str::to_owned),
+                },
+                ..Default::default()
             };
             spec = spec.with_edge(
                 EdgeSpec::new(
