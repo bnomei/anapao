@@ -917,7 +917,9 @@ fn validate_state_connection_invariants(
                 });
             }
 
-            let _ = required_state_target_connection(edge_id, state.target_connection.as_ref())?;
+            let target_id =
+                required_state_target_connection(edge_id, state.target_connection.as_ref())?;
+            let _ = required_target_edge(spec, edge_id, target_id)?;
         }
     }
 
@@ -2352,6 +2354,46 @@ mod tests {
         let missing_edge_target_error =
             compile_scenario(&missing_edge_target_spec).expect_err("missing target edge must fail");
         match missing_edge_target_error {
+            SetupError::InvalidGraphReference { graph, reference } => {
+                assert_eq!(graph, "scenario[scenario].edges");
+                assert_eq!(
+                    reference,
+                    "edges.state-edge.connection.state.target_connection references missing edges.missing-edge; hint: choose one of the available edge IDs: [resource-edge, state-edge]"
+                );
+            }
+            other => panic!("expected InvalidGraphReference, got {other:?}"),
+        }
+
+        let missing_formula_target_spec = ScenarioSpec::new(ScenarioId::fixture("scenario"))
+            .with_node(NodeSpec::new(source.clone(), NodeKind::Source))
+            .with_node(NodeSpec::new(sink.clone(), NodeKind::Sink))
+            .with_edge(EdgeSpec::new(
+                resource_edge_id.clone(),
+                source.clone(),
+                sink.clone(),
+                TransferSpec::Fixed { amount: 1.0 },
+            ))
+            .with_edge(
+                EdgeSpec::new(
+                    crate::types::EdgeId::fixture("state-edge"),
+                    source.clone(),
+                    sink.clone(),
+                    TransferSpec::Remaining,
+                )
+                .with_connection(EdgeConnectionConfig {
+                    kind: ConnectionKind::State,
+                    resource: Default::default(),
+                    state: StateConnectionConfig {
+                        role: StateConnectionRole::Modifier,
+                        target: StateConnectionTarget::Formula,
+                        target_connection: Some(crate::types::EdgeId::fixture("missing-edge")),
+                        ..Default::default()
+                    },
+                }),
+            );
+        let missing_formula_target_error = compile_scenario(&missing_formula_target_spec)
+            .expect_err("missing formula target edge must fail");
+        match missing_formula_target_error {
             SetupError::InvalidGraphReference { graph, reference } => {
                 assert_eq!(graph, "scenario[scenario].edges");
                 assert_eq!(
