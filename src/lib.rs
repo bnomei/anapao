@@ -99,6 +99,41 @@
 //! Existing DTO authoring remains supported: pass a [`ScenarioSpec`] to
 //! [`Simulator::compile`]. Both compile routes converge on the same opaque plan.
 //!
+//! ## Declarative checked authoring
+//!
+//! [`scenario!`] is the single declarative checked-authoring macro. It produces the same checked
+//! [`Scenario`] as [`ScenarioBuilder`], rather than a serde document or a second validation path.
+//! It returns `Result<Scenario, SetupError>`: use `?` when setup errors should propagate, or
+//! match `Err` when a caller needs to handle them. The exact queue-flow intake form is:
+//!
+//! ```rust
+//! let scenario = anapao::scenario! {
+//!     id: "queue-flow";
+//!
+//!     nodes {
+//!         source: Source { initial: 64.0 };
+//!         delay: Delay { steps: 2 };
+//!         sink: Pool;
+//!     }
+//!     edges {
+//!         source_delay: source -> delay => fixed(1.0);
+//!         delay_sink: delay -> sink => remaining;
+//!     }
+//! }?;
+//! # let _ = scenario;
+//! # Ok::<(), anapao::error::SetupError>(())
+//! ```
+//!
+//! The macro takes scenario fields in this canonical order: `id`, optional `title`,
+//! `description`, `tags`, `variables`, and `metadata`; required `nodes` and `edges`; then
+//! optional `track` and repeated `end` statements. Sections are semicolon-separated. A native
+//! node config/mode and `config: ...` are exclusive. Node and edge symbols map to their exact
+//! spelling in distinct namespaces; tracked metrics are node-backed, and state targets may use
+//! forward edge symbols. It evaluates each expression once, uses `$crate` hygiene (including when
+//! this dependency is renamed), and adds no panic path; builder validation supplies semantic
+//! errors. These grammar, mapping, evaluation, result/error, and root/prelude paths are public
+//! 0.2 compatibility promises.
+//!
 //! ## Deterministic Single Run
 //! ```rust
 //! use anapao::{Simulator, testkit};

@@ -6,6 +6,133 @@
 /// The macro is an ergonomic front end for [`ScenarioBuilder`](crate::types::ScenarioBuilder):
 /// captured expressions are evaluated once, identifiers come from the exact spelling of their
 /// symbols, and whole-graph validation remains owned by `ScenarioBuilder::build`.
+/// It returns `Result<Scenario, SetupError>`; malformed macro grammar is a compile-time error,
+/// while graph and value errors remain recoverable [`SetupError`](crate::error::SetupError)s.
+///
+/// Invoke it as [`crate::scenario!`] or, after `use anapao::prelude::*`, as `scenario!`. The
+/// deliberate public macro set contains this one macro: it does not add assertion, expectation,
+/// configuration, or report helper macros. Normal associated functions (with `#[track_caller]`
+/// where useful) are the preferred direction for future assertion ergonomics.
+///
+/// # Grammar
+///
+/// The canonical top-level order is fixed:
+///
+/// ```text
+/// scenario! {
+///     id: scenario_id_expr;
+///     title: title_expr;                         // optional
+///     description: description_expr;             // optional
+///     tags [tag_expr, another_tag_expr,];        // optional
+///     variables: variable_runtime_config_expr;   // optional
+///     metadata { key_expr => value_expr, }       // optional
+///     nodes { node declarations }
+///     edges { edge declarations }
+///     track [node_symbol, another_symbol,];      // optional
+///     end end_condition;                         // repeated zero or more times
+/// }
+/// ```
+///
+/// `nodes` and `edges` are required. Sections and declarations use semicolons; property lists,
+/// tag lists, metadata blocks, tracking lists, and `any`/`all` lists accept a trailing comma.
+/// `id` accepts any expression that implements `TryInto<ScenarioId>`, including `&str`, `String`,
+/// and `ScenarioId`. All other values below are ordinary expressions unless a form names a symbol.
+///
+/// ## Nodes
+///
+/// A declaration is one of `symbol: Source`, `symbol: Process`, `symbol: Sink`, `symbol: Gate`,
+/// `symbol: Custom(family_expr)`, or `symbol: Family { properties }`. The complete family list is
+/// `Source`, `Pool`, `Drain`, `SortingGate`, `TriggerGate`, `MixedGate`, `Converter`, `Trader`,
+/// `Register`, `Delay`, `Queue`, `Process`, `Sink`, `Gate`, and `Custom(family_expr)`.
+///
+/// Every family accepts these common properties inside braces: `label: string_expr`,
+/// `initial: f64_expr`, `tags [tag_expr,]`, and `metadata { key_expr => value_expr, }`. The
+/// configured families also accept exactly one typed escape, `config: checked_config_expr`; it is
+/// exclusive with all native config properties. Their complete native property sets are:
+///
+/// | Family | Native properties |
+/// | --- | --- |
+/// | `Pool` | `capacity: u64_expr` or `capacity: none`; `allow_negative_start: bool_expr`; `mode: NodeModeConfig`, or `trigger: TriggerMode` and/or `action: ActionMode` |
+/// | `Drain` | `mode`, or `trigger` and/or `action` |
+/// | `SortingGate` | `mode`, or `trigger` and/or `action` |
+/// | `TriggerGate` | `mode`, or `trigger` and/or `action` |
+/// | `MixedGate` | `mode`, or `trigger` and/or `action` |
+/// | `Converter` | `ignore_disabled_inputs: bool_expr`; `mode`, or `trigger` and/or `action` |
+/// | `Trader` | `ignore_disabled_inputs: bool_expr`; `mode`, or `trigger` and/or `action` |
+/// | `Register` | `interactive: bool_expr`; `min_value: i64_expr` or `none`; `max_value: i64_expr` or `none` |
+/// | `Delay` | `steps: u64_expr`; `mode`, or `trigger` and/or `action` |
+/// | `Queue` | `capacity: u64_expr` or `none`; `release_per_step: u64_expr`; `mode`, or `trigger` and/or `action` |
+///
+/// Omitted config properties retain the checked type's default. `Delay.steps`, a present
+/// `Queue.capacity`, and `Queue.release_per_step` must be positive and otherwise return the
+/// existing [`SetupError`](crate::error::SetupError). `mode` cannot be combined with `trigger` or
+/// `action`; `trigger` and `action` can be supplied independently. Duplicate, unknown, and
+/// wrong-family properties are compile-time syntax errors.
+///
+/// ## Edges, transfers, and connections
+///
+/// An edge is `edge_symbol: from_symbol -> to_symbol => transfer` with an optional connection
+/// suffix. The transfer is exactly one of `fixed(amount_expr)`,
+/// `fraction(numerator_expr, denominator_expr)`, `remaining`,
+/// `metric_scaled(node_symbol, factor_expr)`, `expression(formula_expr)`, or
+/// `transfer(transfer_spec_expr)`.
+///
+/// With no suffix, the edge has the default resource connection. A resource suffix is
+/// `resource { properties }`, where properties are `connection: ResourceConnection_expr` or
+/// `token_size: u64_expr` (exclusive), plus optional `enabled: bool_expr` and
+/// `metadata { key_expr => value_expr, }`. A present `token_size` must be positive. A state suffix
+/// is `state { properties }`, where properties are `connection: StateConnection_expr` (exclusive
+/// with the native connection properties), native `role: StateConnectionRole_expr`,
+/// `formula: formula_expr`, `target: target_form`, and `resource_filter: filter_expr`, plus
+/// optional `enabled: bool_expr` and `metadata { key_expr => value_expr, }`.
+///
+/// The four `target_form` values are `node`, `resource_connection(edge_symbol)`,
+/// `state_connection(edge_symbol)`, and `formula(edge_symbol)`. All edge symbols are registered
+/// before construction, so a state target may name an edge declared later.
+///
+/// ## Tracking and end conditions
+///
+/// Tracking is `track [node_symbol, another_node_symbol,]`. Each symbol becomes its node-backed
+/// `MetricKey`. An `end` statement contains exactly one of:
+///
+/// ```text
+/// max_steps(steps_expr)
+/// metric_at_least(node_symbol, scaled_i64_expr)
+/// metric_at_most(node_symbol, scaled_i64_expr)
+/// node_at_least(node_symbol, scaled_i64_expr)
+/// node_at_most(node_symbol, scaled_i64_expr)
+/// any [end_condition, another_end_condition,]
+/// all [end_condition, another_end_condition,]
+/// condition(end_condition_spec_expr)
+/// ```
+///
+/// Multiple `end` statements retain declaration order and become the checked builder's end list,
+/// which keeps its established top-level OR semantics. Without an `end` statement, the builder's
+/// default `MaxSteps(1)` remains. Thresholds are existing scaled `i64` values; the macro performs
+/// no implicit floating-point scaling.
+///
+/// Node and edge declaration names are Rust identifiers. Their exact `stringify!` spelling is the
+/// generated ID, and the node and edge namespaces are separate. Dynamic IDs remain available via
+/// [`ScenarioBuilder`](crate::types::ScenarioBuilder). A tracked metric, `metric_scaled`, and
+/// metric end conditions use the retained node symbol; unknown and duplicate references go to the
+/// checked builder for its stable semantic diagnostic.
+///
+/// Symbols use their exact `stringify!` spelling as IDs. Node and edge symbols have separate
+/// namespaces, so they may have the same spelling. A tracked metric is backed by the node symbol;
+/// state targets may refer to edges declared later. Unknown and duplicate references are passed to
+/// the checked builder, which supplies its stable semantic diagnostic.
+///
+/// Expansion uses `$crate` and absolute standard-library paths, so caller imports and a renamed
+/// Cargo dependency do not affect it. Each captured expression is evaluated once. It introduces
+/// no panic path: only the builder performs semantic validation. The macro produces the checked
+/// value, not a serde format or a second validation path.
+///
+/// # Compatibility
+///
+/// In public 0.2, this grammar, symbol mapping, single-evaluation behavior, `Result<Scenario,
+/// SetupError>` contract, and root/prelude invocation paths are compatibility promises. Keep
+/// `ScenarioBuilder` for direct checked Rust authoring and `ScenarioSpec` followed by
+/// `Scenario::try_from` for stable serde documents.
 #[macro_export]
 macro_rules! scenario {
     // Public entry. Section order is intentionally fixed so malformed input has a useful error.

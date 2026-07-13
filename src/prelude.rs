@@ -7,6 +7,8 @@
 
 pub use crate::assertions::{AssertionReport, Expectation, MetricSelector};
 pub use crate::events::{EventSink, VecEventSink};
+/// The one declarative checked-scenario macro. It is also available as [`crate::scenario!`].
+pub use crate::scenario;
 pub use crate::types::{
     AggregationConfig, BatchConfig, BatchReport, BatchRunTemplate, CaptureConfig, CaptureSchedule,
     ConnectionSpec, ConverterConfig, DelayConfig, DrainConfig, EdgeId, EndConditionSpec,

@@ -1,5 +1,6 @@
 use std::fs;
 
+use anapao::error::SetupError;
 use anapao::types::{
     AggregationConfig, BatchConfig, BatchRunTemplate, CaptureConfig, CaptureSchedule, EdgeId,
     EndConditionSpec, ExecutionMode, MetricKey, NodeId, ResourceConnection, RunConfig,
@@ -7,6 +8,70 @@ use anapao::types::{
     StateConnectionRole, StateTarget, TransferSpec,
 };
 use anapao::Simulator;
+
+#[test]
+fn macro_root_and_prelude_paths_match_direct_checked_builder() {
+    let macro_scenario = anapao::scenario! {
+        id: "macro-paths";
+        nodes {
+            source: Source { initial: 2.0 };
+            sink: Sink;
+        }
+        edges {
+            flow: source -> sink => remaining;
+        }
+        track [sink];
+        end max_steps(2);
+    }
+    .expect("root macro path builds");
+
+    let direct_scenario = ScenarioBuilder::new(ScenarioId::fixture("macro-paths"))
+        .with_node(ScenarioNode::source(NodeId::fixture("source")).with_initial_value(2.0))
+        .expect("add source")
+        .with_node(ScenarioNode::sink(NodeId::fixture("sink")))
+        .expect("add sink")
+        .with_edge(ScenarioEdge::resource(
+            EdgeId::fixture("flow"),
+            NodeId::fixture("source"),
+            NodeId::fixture("sink"),
+            TransferSpec::Remaining,
+            ResourceConnection::default(),
+        ))
+        .expect("add flow")
+        .with_tracked_metric(MetricKey::fixture("sink"))
+        .with_end_condition(EndConditionSpec::MaxSteps { steps: 2 })
+        .build()
+        .expect("direct checked scenario builds");
+
+    assert_eq!(macro_scenario.source_spec(), direct_scenario.source_spec());
+
+    use anapao::prelude::*;
+    let prelude_scenario = scenario! {
+        id: "prelude-path";
+        nodes { source: Source; sink: Sink; }
+        edges { flow: source -> sink => remaining; }
+    }
+    .expect("prelude macro path builds");
+    assert_eq!(prelude_scenario.id().as_str(), "prelude-path");
+}
+
+#[test]
+fn macro_setup_errors_are_handled_as_results() {
+    let result = anapao::scenario! {
+        id: "handled-error";
+        nodes { source: Source; }
+        edges { flow: source -> missing => remaining; }
+    };
+
+    match result {
+        Err(SetupError::InvalidGraphReference { graph, reference }) => {
+            assert_eq!(graph, "scenario[handled-error].nodes");
+            assert!(reference.contains("missing"));
+        }
+        Err(error) => panic!("unexpected setup error: {error}"),
+        Ok(_) => panic!("missing node must be a recoverable setup error"),
+    }
+}
 
 #[test]
 fn readme_s01_build_minimal_scenario() {
@@ -161,6 +226,10 @@ fn readme_contains_curated_builder_snippet_signatures() {
         "`CaptureConfig::none()` leaves `RunReport::final_node_values` and `RunReport::final_metrics`",
         "monotonic-series assertions, and series probability assertions require captured or aggregated",
         "`CaptureConfig::{none, final_only, default}`",
+        "## Declarative `scenario!` Authoring",
+        "let scenario = anapao::scenario! {",
+        "contains exactly one macro: `scenario!`. There are no `expectations!`",
+        "`Result<Scenario, SetupError>`",
     ] {
         assert!(readme.contains(needle), "README drift: missing snippet marker `{needle}`");
     }

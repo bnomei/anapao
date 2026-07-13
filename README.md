@@ -123,6 +123,118 @@ types remain available from `anapao::types` when their defaults need customizati
 
 ---
 
+## Declarative `scenario!` Authoring
+
+`anapao::scenario!` is the concise route to the same checked `Scenario` authored by
+`ScenarioBuilder`; it is not another serde format or validation path. The deliberate macro set
+contains exactly one macro: `scenario!`. There are no `expectations!`, assertion, config, or
+report macros. Future assertion ergonomics should use normal associated functions, with
+`#[track_caller]` where call-site diagnostics benefit from it.
+
+The exact queue-flow intake example is executable unchanged:
+
+```rust
+let scenario = anapao::scenario! {
+    id: "queue-flow";
+
+    nodes {
+        source: Source { initial: 64.0 };
+        delay: Delay { steps: 2 };
+        sink: Pool;
+    }
+    edges {
+        source_delay: source -> delay => fixed(1.0);
+        delay_sink: delay -> sink => remaining;
+    }
+}?;
+# let _ = scenario;
+# Ok::<(), anapao::error::SetupError>(())
+```
+
+A complete authoring shape can use every scenario-level section plus native and typed escape
+forms. Here, `config`, `transfer`, `connection`, and `condition` pass existing checked values
+through unchanged.
+
+```rust
+use anapao::types::{
+    EndConditionSpec, PoolConfig, ResourceConnection, Scenario, StateConnection,
+    TransferSpec, VariableRuntimeConfig,
+};
+
+let typed_pool = PoolConfig::default().with_capacity(16);
+let typed_transfer = TransferSpec::Remaining;
+let typed_state = StateConnection::default();
+let typed_end = EndConditionSpec::MaxSteps { steps: 8 };
+let typed_variables = VariableRuntimeConfig::default();
+
+let scenario: Scenario = anapao::scenario! {
+    id: "complete-macro";
+    title: "Complete macro authoring";
+    description: "native and typed forms";
+    tags ["docs", "checked"];
+    variables: typed_variables;
+    metadata {"owner" => "docs"}
+    nodes {
+        source: Source { initial: 4.0, label: "Input" };
+        buffer: Pool { config: typed_pool };
+        sink: Sink { tags ["output"] };
+    }
+    edges {
+        ingress: source -> buffer => fixed(1.0) resource {
+            connection: ResourceConnection::default(), enabled: true
+        };
+        egress: buffer -> sink => transfer(typed_transfer) state { connection: typed_state };
+    }
+    track [source, sink];
+    end max_steps(4);
+    end condition(typed_end);
+}?;
+# let _ = scenario;
+# Ok::<(), anapao::error::SetupError>(())
+```
+
+The canonical section order is `id`; optional `title`, `description`, `tags`, `variables`, and
+`metadata`; required `nodes` and `edges`; then optional `track` and repeated `end` statements.
+Use semicolons between sections and declarations; lists and blocks accept trailing separators.
+Native node config/mode fields and `config: ...` are mutually exclusive. Consult the
+[`scenario!` rustdoc](https://docs.rs/anapao/latest/anapao/macro.scenario.html) for the complete
+grammar and each node, transfer, connection, state-target, and end-condition family.
+
+Node and edge symbols turn into IDs from their exact spelling, while retaining separate node and
+edge namespaces. A tracked metric is backed by its node symbol. State targets may name an edge
+that is declared later. The macro deliberately delegates unknown references, duplicate symbols,
+and graph semantics to `ScenarioBuilder`, preserving its established error diagnostics.
+
+`scenario!` returns `Result<Scenario, SetupError>`. Propagate setup failures with `?`, or handle
+them explicitly:
+
+```rust
+use anapao::error::SetupError;
+
+let result = anapao::scenario! {
+    id: "handled-error";
+    nodes { source: Source; }
+    edges { flow: source -> missing => remaining; }
+};
+
+match result {
+    Err(SetupError::InvalidGraphReference { .. }) => {}
+    Err(error) => return Err(error),
+    Ok(scenario) => drop(scenario),
+}
+# Ok::<(), SetupError>(())
+```
+
+Macro expressions are evaluated once. Expansion uses `$crate` and absolute standard-library paths,
+so it is hygienic with caller names, imports, and Cargo dependency renames. It introduces no
+panic path; only the checked builder performs semantic validation. In public 0.2, the grammar,
+symbol mapping, evaluation count, result/error types, and root (`anapao::scenario!`) and wildcard
+prelude (`use anapao::prelude::*; scenario!`) paths are SemVer promises. Keep
+`ScenarioBuilder` for direct checked Rust authoring, and keep the `ScenarioSpec` load followed by
+`Scenario::try_from` route for stable serde documents.
+
+---
+
 ## Step 1: Create `ScenarioSpec`
 
 `ScenarioSpec` is your declarative model: nodes, edges, end conditions, and tracked metrics.
